@@ -38,6 +38,17 @@ public class ReactNativePasskeyAutofillModule: Module {
       store.saveHdRootKeyId(id)
     }
 
+    AsyncFunction("setHdRootSecret") { (secret: String) in
+      guard let store = PasskeyCredentialStore() else {
+        throw NSError(
+          domain: "ReactNativePasskeyAutofill",
+          code: 1,
+          userInfo: [NSLocalizedDescriptionKey: "App Group is not configured for passkey autofill."]
+        )
+      }
+      store.saveHdRootSecret(secret)
+    }
+
     AsyncFunction("getHdRootKeyId") { () -> String? in
       guard let store = PasskeyCredentialStore() else {
         return nil

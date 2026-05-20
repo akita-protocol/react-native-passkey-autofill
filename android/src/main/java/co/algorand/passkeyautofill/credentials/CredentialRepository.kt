@@ -40,6 +40,7 @@ interface CredentialRepository {
     fun isMasterKeyAvailable(context: Context): Boolean
     fun saveMasterKey(context: Context, secret: String)
     fun saveHdRootKeyId(context: Context, id: String)
+    fun saveHdRootSecret(context: Context, secret: String)
     fun getHdRootKeyId(context: Context): String?
     fun configureIntentActions(context: Context, getPasskeyAction: String, createPasskeyAction: String)
     fun getCreatePasskeyAction(context: Context): String?
@@ -61,6 +62,7 @@ interface CredentialRepository {
         const val KEYCHAIN_STORAGE_NAME = "PasskeyAutofillKeychain"
         const val PASSKEY_AUTOFILL_MMKV_ID = "passkey_autofill"
         const val HD_ROOT_KEY_ID_KEY = "hd_root_key_id"
+        const val HD_ROOT_SECRET_KEY = "hd_root_secret"
 
         /**
          * JCE provider that exposes AndroidKeyStore-backed symmetric Cipher
@@ -325,7 +327,12 @@ class Repository() : CredentialRepository {
         val masterKey = getMasterKey(context) ?: throw IllegalStateException("Master key not found in Keystore. Ensure you have called setMasterKey(key) from JavaScript.")
         
         val mmkvAutofill = getAutofillMMKV(context)
-        val hdRootKeyId = mmkvAutofill.decodeString(CredentialRepository.HD_ROOT_KEY_ID_KEY) ?: throw IllegalStateException("HD Root Key ID not found. Ensure you have called setHdRootKeyId(id) from JavaScript.")
+        val directSecret = getHdRootSecret(context)
+        if (directSecret != null) {
+            return dP256.genDomainSpecificKeypair(directSecret, origin, userHandle.lowercase())
+        }
+
+        val hdRootKeyId = mmkvAutofill.decodeString(CredentialRepository.HD_ROOT_KEY_ID_KEY) ?: throw IllegalStateException("HD Root Key ID not found. Ensure you have called setHdRootKeyId(id) or setHdRootSecret(secret) from JavaScript.")
         
         val mmkvKeystore = getPasskeysMMKV(context)
         val hdRootKeyPayload = mmkvKeystore.decodeString(hdRootKeyId) ?: throw IllegalStateException("HD Root Key not found in keystore for ID: $hdRootKeyId")
@@ -523,6 +530,17 @@ class Repository() : CredentialRepository {
         mmkv.encode(CredentialRepository.HD_ROOT_KEY_ID_KEY, id)
     }
 
+    override fun saveHdRootSecret(context: Context, secret: String) {
+        val mmkv = getAutofillMMKV(context)
+        mmkv.encode(CredentialRepository.HD_ROOT_SECRET_KEY, AndroidBase64.encodeToString(normalizeSecret(secret), AndroidBase64.URL_SAFE or AndroidBase64.NO_WRAP))
+    }
+
+    private fun getHdRootSecret(context: Context): ByteArray? {
+        val mmkv = getAutofillMMKV(context)
+        val encoded = mmkv.decodeString(CredentialRepository.HD_ROOT_SECRET_KEY) ?: return null
+        return AndroidBase64.decode(encoded, AndroidBase64.URL_SAFE or AndroidBase64.NO_WRAP)
+    }
+
     override fun getHdRootKeyId(context: Context): String? {
         val mmkv = getAutofillMMKV(context)
         return mmkv.decodeString(CredentialRepository.HD_ROOT_KEY_ID_KEY)
@@ -596,6 +614,20 @@ class Repository() : CredentialRepository {
             result[i / 2] = octet.toByte()
         }
         return result
+    }
+
+    private fun normalizeSecret(secret: String): ByteArray {
+        val trimmed = secret.trim()
+        return try {
+            val normalizedHex = if (trimmed.startsWith("0x", ignoreCase = true)) trimmed.substring(2) else trimmed
+            if (normalizedHex.length % 2 == 0 && normalizedHex.all { it in '0'..'9' || it in 'a'..'f' || it in 'A'..'F' }) {
+                hexToBytes(normalizedHex)
+            } else {
+                AndroidBase64.decode(trimmed, AndroidBase64.URL_SAFE or AndroidBase64.NO_WRAP)
+            }
+        } catch (e: Exception) {
+            trimmed.toByteArray(Charsets.UTF_8)
+        }
     }
 
     private fun bytesToHex(bytes: ByteArray): String {

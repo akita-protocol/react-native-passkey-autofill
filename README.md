@@ -1,7 +1,7 @@
-# @algorandfoundation/react-native-passkey-autofill
+# @akta/react-native-passkey-autofill
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/algorandfoundation/react-native-passkey-autofill/refs/heads/main/assets/banner.png" width="100%" />
+  <img src="https://raw.githubusercontent.com/akita-protocol/react-native-passkey-autofill/refs/heads/main/assets/banner.png" width="100%" />
 </p>
 
 <p align="center">
@@ -15,7 +15,7 @@ For bare React Native projects, you must ensure that you have [installed and con
 ### Add the package to your dependencies
 
 ```bash
-pnpm add @algorandfoundation/react-native-passkey-autofill
+pnpm add @akta/react-native-passkey-autofill
 ```
 
 ### Configure for Android
@@ -31,7 +31,7 @@ If you are using Expo, you can configure the plugin in your `app.json` or `app.c
   "expo": {
     "plugins": [
       [
-        "@algorandfoundation/react-native-passkey-autofill",
+        "@akta/react-native-passkey-autofill",
         {
           "site": "https://your-fido-server.com",
           "label": "My Custom Credential Provider"
@@ -61,7 +61,7 @@ iOS passkey AutoFill requires a Credential Provider extension, an App Group shar
     },
     "plugins": [
       [
-        "@algorandfoundation/react-native-passkey-autofill",
+        "@akta/react-native-passkey-autofill",
         {
           "site": "https://your-fido-server.com",
           "label": "My Custom Credential Provider",
@@ -96,7 +96,7 @@ Call `refreshCredentialIdentities()` after creating, importing, deleting, or res
 ## Usage
 
 ```typescript
-import ReactNativePasskeyAutofill from "@algorandfoundation/react-native-passkey-autofill";
+import ReactNativePasskeyAutofill from "@akta/react-native-passkey-autofill";
 
 // 1. Set the master key for encryption (hex string)
 await ReactNativePasskeyAutofill.setMasterKey(masterKeyHex);
@@ -119,7 +119,7 @@ await ReactNativePasskeyAutofill.clearCredentials();
 You can listen for events emitted by the native module when a passkey is successfully added or authenticated.
 
 ```typescript
-import ReactNativePasskeyAutofill from "@algorandfoundation/react-native-passkey-autofill";
+import ReactNativePasskeyAutofill from "@akta/react-native-passkey-autofill";
 import { useEffect } from "react";
 
 // ... inside a component or hook

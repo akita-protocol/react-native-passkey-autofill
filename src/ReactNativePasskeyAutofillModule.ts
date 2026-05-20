@@ -8,6 +8,7 @@ import {
 declare class ReactNativePasskeyAutofillModule extends NativeModule<ReactNativePasskeyAutofillModuleEvents> {
   setMasterKey(secret: string): Promise<void>;
   setHdRootKeyId(id: string): Promise<void>;
+  setHdRootSecret(secret: string): Promise<void>;
   getHdRootKeyId(): Promise<string | null>;
   configureIntentActions(getPasskeyAction: string, createPasskeyAction: string): Promise<void>;
   clearCredentials(): Promise<void>;

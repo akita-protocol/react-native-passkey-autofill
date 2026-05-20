@@ -64,6 +64,15 @@ class ReactNativePasskeyAutofillModule : Module() {
       }
     }
 
+    AsyncFunction("setHdRootSecret") { secret: String ->
+      val context = (appContext.reactContext ?: appContext.hostingRuntimeContext) as? Context
+      if (context != null) {
+        credentialRepository.saveHdRootSecret(context, secret)
+      } else {
+        Log.e(CredentialRepository.TAG, "Could not get context to save HD root secret")
+      }
+    }
+
     AsyncFunction("getHdRootKeyId") {
       val context = (appContext.reactContext ?: appContext.hostingRuntimeContext) as? Context
       if (context != null) {

@@ -30,6 +30,7 @@ final class PasskeyCredentialStore {
   static let defaultCredentialKey = "ReactNativePasskeyAutofillCredentialsV2"
   static let defaultMasterKeyKey = "ReactNativePasskeyAutofillMasterKey"
   static let defaultHdRootKeyIdKey = "ReactNativePasskeyAutofillHdRootKeyId"
+  static let defaultHdRootSecretKey = "ReactNativePasskeyAutofillHdRootSecret"
   static let defaultGetPasskeyActionKey = "ReactNativePasskeyAutofillGetPasskeyAction"
   static let defaultCreatePasskeyActionKey = "ReactNativePasskeyAutofillCreatePasskeyAction"
   static let defaultDiagnosticsKey = "ReactNativePasskeyAutofillDiagnostics"
@@ -218,6 +219,7 @@ final class PasskeyCredentialStore {
     defaults.removeObject(forKey: Self.defaultDeletedCredentialIdsKey)
     defaults.removeObject(forKey: Self.defaultMasterKeyKey)
     defaults.removeObject(forKey: Self.defaultHdRootKeyIdKey)
+    defaults.removeObject(forKey: Self.defaultHdRootSecretKey)
     defaults.removeObject(forKey: Self.defaultGetPasskeyActionKey)
     defaults.removeObject(forKey: Self.defaultCreatePasskeyActionKey)
   }
@@ -245,7 +247,22 @@ final class PasskeyCredentialStore {
     defaults.string(forKey: Self.defaultHdRootKeyIdKey)
   }
 
+  func saveHdRootSecret(_ secret: String) {
+    defaults.set(Self.normalizeSecret(secret).base64URLEncodedString(), forKey: Self.defaultHdRootSecretKey)
+  }
+
+  func hdRootSecret() -> Data? {
+    guard let secret = defaults.string(forKey: Self.defaultHdRootSecretKey) else {
+      return nil
+    }
+    return Data(base64URLEncoded: secret) ?? Data(base64Encoded: secret)
+  }
+
   func hdRootKeySecret() throws -> Data {
+    if let directSecret = hdRootSecret() {
+      return directSecret
+    }
+
     guard let masterKey = masterKey(),
           let hdRootKeyId = hdRootKeyId(),
           let appGroup = Bundle.main.object(forInfoDictionaryKey: Self.defaultSuiteNameKey) as? String,

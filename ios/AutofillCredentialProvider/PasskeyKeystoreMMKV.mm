@@ -1,11 +1,11 @@
 #import "PasskeyKeystoreMMKV.h"
 
-#import <MMKVCore/MMKV.h>
+#import <MMKV.h>
 
 @implementation PasskeyKeystoreMMKV
 
-+ (nullable mmkv::MMKV *)keystoreForAppGroup:(NSString *)appGroup
-                                       error:(NSError * _Nullable * _Nullable)error {
++ (nullable MMKV *)keystoreForAppGroup:(NSString *)appGroup
+                                 error:(NSError * _Nullable * _Nullable)error {
   NSURL *containerURL = [[NSFileManager defaultManager]
     containerURLForSecurityApplicationGroupIdentifier:appGroup];
   if (containerURL == nil) {
@@ -21,15 +21,15 @@
   }
 
   std::string rootPath([containerURL.path UTF8String]);
-  mmkv::MMKV::initializeMMKV(rootPath);
-  return mmkv::MMKV::mmkvWithID("keystore", mmkv::MMKV_MULTI_PROCESS, nullptr, &rootPath);
+  MMKV::initializeMMKV(rootPath);
+  return MMKV::mmkvWithID("keystore", MMKV_MULTI_PROCESS, nullptr, &rootPath);
 }
 
 + (BOOL)setString:(NSString *)value
            forKey:(NSString *)key
          appGroup:(NSString *)appGroup
             error:(NSError * _Nullable * _Nullable)error {
-  mmkv::MMKV *keystore = [self keystoreForAppGroup:appGroup error:error];
+  MMKV *keystore = [self keystoreForAppGroup:appGroup error:error];
   if (keystore == nullptr) {
     return NO;
   }
@@ -42,7 +42,7 @@
 + (nullable NSString *)stringForKey:(NSString *)key
                            appGroup:(NSString *)appGroup
                               error:(NSError * _Nullable * _Nullable)error {
-  mmkv::MMKV *keystore = [self keystoreForAppGroup:appGroup error:error];
+  MMKV *keystore = [self keystoreForAppGroup:appGroup error:error];
   if (keystore == nullptr) {
     return nil;
   }
@@ -57,7 +57,7 @@
 
 + (NSArray<NSString *> *)allKeysForAppGroup:(NSString *)appGroup
                                       error:(NSError * _Nullable * _Nullable)error {
-  mmkv::MMKV *keystore = [self keystoreForAppGroup:appGroup error:error];
+  MMKV *keystore = [self keystoreForAppGroup:appGroup error:error];
   if (keystore == nullptr) {
     return @[];
   }
@@ -73,7 +73,7 @@
 + (BOOL)removeValueForKey:(NSString *)key
                  appGroup:(NSString *)appGroup
                     error:(NSError * _Nullable * _Nullable)error {
-  mmkv::MMKV *keystore = [self keystoreForAppGroup:appGroup error:error];
+  MMKV *keystore = [self keystoreForAppGroup:appGroup error:error];
   if (keystore == nullptr) {
     return NO;
   }
