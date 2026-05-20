@@ -3,8 +3,8 @@
   "compilerOptions": {
     "strict": true,
     "paths": {
-      "@algorandfoundation/react-native-passkey-autofill": ["../src/index"],
-      "@algorandfoundation/react-native-passkey-autofill/*": ["../src/*"]
+      "@akta/react-native-passkey-autofill": ["../src/index"],
+      "@akta/react-native-passkey-autofill/*": ["../src/*"]
     }
   }
 }

@@ -41,6 +41,19 @@ public class ReactNativePasskeyAutofillModule: Module {
       store.saveMainKeyId(id)
     }
 
+    // Akita: shares the wallet's HD root secret directly. New passkeys derive
+    // from it (scheme `akita-hd-root`); it is kept in the shared Keychain group.
+    AsyncFunction("setHdRootSecret") { (secret: Data) in
+      guard let store = PasskeyCredentialStore() else {
+        throw NSError(
+          domain: "ReactNativePasskeyAutofill",
+          code: 1,
+          userInfo: [NSLocalizedDescriptionKey: "App Group is not configured for passkey autofill."]
+        )
+      }
+      try store.saveHdRootSecret(secret)
+    }
+
     AsyncFunction("getMainKeyId") { () -> String? in
       guard let store = PasskeyCredentialStore() else {
         return nil

@@ -1,22 +1,22 @@
 {
-  "name": "@algorandfoundation/react-native-passkey-autofill",
+  "name": "@akta/react-native-passkey-autofill",
   "version": "1.0.0-canary.29",
   "description": "Passkey AutoFill React Native",
   "keywords": [
-    "@algorandfoundation/react-native-passkey-autofill",
+    "@akta/react-native-passkey-autofill",
     "ReactNativePasskeyAutofill",
     "expo",
     "react-native"
   ],
-  "homepage": "https://github.com/algorandfoundation/react-native-passkey-autofill#readme",
+  "homepage": "https://github.com/akita-protocol/react-native-passkey-autofill#readme",
   "bugs": {
-    "url": "https://github.com/algorandfoundation/react-native-passkey-autofill/issues"
+    "url": "https://github.com/akita-protocol/react-native-passkey-autofill/issues"
   },
   "license": "Apache-2.0",
   "author": "Algorand Foundation",
   "repository": {
     "type": "git",
-    "url": "git+ssh://git@github.com/algorandfoundation/react-native-passkey-autofill.git"
+    "url": "git+ssh://git@github.com/akita-protocol/react-native-passkey-autofill.git"
   },
   "main": "build/index.js",
   "types": "build/index.d.ts",
@@ -32,8 +32,8 @@
     "fmt": "oxfmt",
     "fmt:check": "oxfmt --check",
     "test": "CI=true expo-module test",
-    "test:android": "cd example/android && ./gradlew :algorandfoundation-react-native-passkey-autofill:testDebugUnitTest --no-daemon",
-    "test:android:instrumented": "cd example/android && ./gradlew :algorandfoundation-react-native-passkey-autofill:connectedDebugAndroidTest --no-daemon",
+    "test:android": "cd example/android && ./gradlew :akta-react-native-passkey-autofill:testDebugUnitTest --no-daemon",
+    "test:android:instrumented": "cd example/android && ./gradlew :akta-react-native-passkey-autofill:connectedDebugAndroidTest --no-daemon",
     "test:all": "pnpm run test && pnpm run test:android",
     "prepublishOnly": "expo-module prepublishOnly",
     "open:ios": "xed example/ios",
@@ -44,8 +44,8 @@
     "appium:setup:ios": "appium driver list --installed 2>&1 | grep -q xcuitest || appium driver install xcuitest",
     "e2e:build:android": "cd example && expo run:android --variant release --no-install --no-bundler",
     "e2e:build:ios": "cd example && expo run:ios --configuration Release --no-install --no-bundler",
-    "e2e:android": "export PATH=$PATH:$ANDROID_HOME/platform-tools && start-server-and-test appium:start http-get://127.0.0.1:4723/status \"pnpm --filter @algorandfoundation/react-native-passkey-autofill-e2e run test:android\"",
-    "e2e:ios": "start-server-and-test appium:start http-get://127.0.0.1:4723/status \"pnpm --filter @algorandfoundation/react-native-passkey-autofill-e2e run test:ios\""
+    "e2e:android": "export PATH=$PATH:$ANDROID_HOME/platform-tools && start-server-and-test appium:start http-get://127.0.0.1:4723/status \"pnpm --filter @akta/react-native-passkey-autofill-e2e run test:android\"",
+    "e2e:ios": "start-server-and-test appium:start http-get://127.0.0.1:4723/status \"pnpm --filter @akta/react-native-passkey-autofill-e2e run test:ios\""
   },
   "dependencies": {
     "@algorandfoundation/react-native-keystore": "1.0.0-canary.16"

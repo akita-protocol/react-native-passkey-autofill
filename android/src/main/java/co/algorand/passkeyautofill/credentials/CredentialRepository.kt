@@ -185,6 +185,14 @@ interface CredentialRepository {
     fun saveMainKeyId(context: Context, id: String)
     fun getMainKeyId(context: Context): String?
 
+    /**
+     * Akita: stores the wallet's HD root secret, the parent of every new site
+     * passkey ([KeystoreRecords.SCHEME_AKITA_HD_ROOT]). It is encrypted under the
+     * module's AndroidKeyStore key like the master key, never kept in plaintext.
+     * Fails closed: throws unless the stored secret reads back unchanged.
+     */
+    fun saveHdRootSecret(context: Context, secret: ByteArray)
+
     @Deprecated("The passkey parent is no longer the BIP32-Ed25519 root", ReplaceWith("saveMainKeyId(context, id)"))
     fun saveHdRootKeyId(context: Context, id: String)
 
@@ -254,6 +262,13 @@ interface CredentialRepository {
         @Deprecated("Superseded by MAIN_KEY_ID_KEY; still read so installed wallets keep working")
         const val HD_ROOT_KEY_ID_KEY = "hd_root_key_id"
         const val BIOMETRIC_KEY_LEVEL_KEY = "biometric_key_level"
+
+        /** Plaintext MMKV slot earlier Akita builds kept the HD root secret in; migrated on read. */
+        const val LEGACY_HD_ROOT_SECRET_KEY = "hd_root_secret"
+
+        /** [KEYCHAIN_STORAGE_NAME] entries holding the Keystore-encrypted HD root secret. */
+        const val HD_ROOT_SECRET_IV_PREF = "hd_root_iv"
+        const val HD_ROOT_SECRET_CONTENT_PREF = "hd_root_content"
 
         /**
          * JCE provider that exposes AndroidKeyStore-backed symmetric Cipher
@@ -649,6 +664,23 @@ class Repository() : CredentialRepository {
 
     override fun resolveParentSecret(context: Context, requestedScheme: String?): ParentSecretResult {
         val masterKey = getMasterKey(context) ?: return ParentSecretResult.MasterKeyUnavailable
+
+        // Akita: a root shared through `setHdRootSecret` is the parent of every new
+        // credential and of every credential pinned to it.
+        if (requestedScheme == null || requestedScheme == KeystoreRecords.SCHEME_AKITA_HD_ROOT) {
+            val root = readHdRootSecret(context)
+            if (root != null) {
+                return ParentSecretResult.Available(
+                    ParentSecret(
+                        keyId = getMainKeyId(context) ?: KeystoreRecords.SCHEME_AKITA_HD_ROOT,
+                        scheme = KeystoreRecords.SCHEME_AKITA_HD_ROOT,
+                        bytes = root,
+                    )
+                )
+            }
+            if (requestedScheme != null) return ParentSecretResult.NoParentKey(requestedScheme)
+        }
+
         val selected = KeystoreRecords.selectParentKey(parentKeyCandidates(context, masterKey), requestedScheme)
             ?: return ParentSecretResult.NoParentKey(requestedScheme)
         val bytes = readMaterial(context, selected.keyId, masterKey)
@@ -834,7 +866,12 @@ class Repository() : CredentialRepository {
         return ks.getKey(CredentialRepository.MASTER_KEY_ALIAS, null) as SecretKey
     }
 
-    private fun encryptToKeychain(context: Context, data: ByteArray) {
+    private fun encryptToKeychain(
+        context: Context,
+        data: ByteArray,
+        ivPref: String = "iv",
+        contentPref: String = "content",
+    ) {
         val cipher = Cipher.getInstance("AES/GCM/NoPadding")
         cipher.init(Cipher.ENCRYPT_MODE, getSecretKey())
         val iv = cipher.iv
@@ -842,15 +879,19 @@ class Repository() : CredentialRepository {
         
         val prefs = context.getSharedPreferences(CredentialRepository.KEYCHAIN_STORAGE_NAME, Context.MODE_PRIVATE)
         prefs.edit()
-            .putString("iv", AndroidBase64.encodeToString(iv, AndroidBase64.NO_WRAP))
-            .putString("content", AndroidBase64.encodeToString(encryptedData, AndroidBase64.NO_WRAP))
+            .putString(ivPref, AndroidBase64.encodeToString(iv, AndroidBase64.NO_WRAP))
+            .putString(contentPref, AndroidBase64.encodeToString(encryptedData, AndroidBase64.NO_WRAP))
             .apply()
     }
 
-    private fun decryptFromKeychain(context: Context): ByteArray? {
+    private fun decryptFromKeychain(
+        context: Context,
+        ivPref: String = "iv",
+        contentPref: String = "content",
+    ): ByteArray? {
         val prefs = context.getSharedPreferences(CredentialRepository.KEYCHAIN_STORAGE_NAME, Context.MODE_PRIVATE)
-        val ivStr = prefs.getString("iv", null) ?: return null
-        val contentStr = prefs.getString("content", null) ?: return null
+        val ivStr = prefs.getString(ivPref, null) ?: return null
+        val contentStr = prefs.getString(contentPref, null) ?: return null
         
         val iv = AndroidBase64.decode(ivStr, AndroidBase64.NO_WRAP)
         val content = AndroidBase64.decode(contentStr, AndroidBase64.NO_WRAP)
@@ -876,6 +917,55 @@ class Repository() : CredentialRepository {
     override fun saveMainKeyId(context: Context, id: String) {
         val mmkv = getAutofillMMKV(context)
         mmkv.encode(CredentialRepository.MAIN_KEY_ID_KEY, id)
+    }
+
+    override fun saveHdRootSecret(context: Context, secret: ByteArray) {
+        require(secret.isNotEmpty()) { "HD root secret must not be empty" }
+        encryptToKeychain(
+            context,
+            secret,
+            CredentialRepository.HD_ROOT_SECRET_IV_PREF,
+            CredentialRepository.HD_ROOT_SECRET_CONTENT_PREF,
+        )
+        // Scrub the plaintext copy earlier builds kept, now that the encrypted one exists.
+        getAutofillMMKV(context).removeValueForKey(CredentialRepository.LEGACY_HD_ROOT_SECRET_KEY)
+        val readBack = decryptFromKeychain(
+            context,
+            CredentialRepository.HD_ROOT_SECRET_IV_PREF,
+            CredentialRepository.HD_ROOT_SECRET_CONTENT_PREF,
+        )
+        check(readBack != null && readBack.contentEquals(secret)) {
+            "HD root secret did not read back after saving"
+        }
+    }
+
+    /** The HD root secret shared through `setHdRootSecret`, or `null`. */
+    private fun readHdRootSecret(context: Context): ByteArray? {
+        try {
+            decryptFromKeychain(
+                context,
+                CredentialRepository.HD_ROOT_SECRET_IV_PREF,
+                CredentialRepository.HD_ROOT_SECRET_CONTENT_PREF,
+            )?.takeIf { it.isNotEmpty() }?.let { return it }
+        } catch (e: Exception) {
+            PasskeyLog.e(CredentialRepository.TAG, "Failed to open the HD root secret", e)
+            return null
+        }
+        // Migration: earlier Akita builds kept the root as plaintext base64url in
+        // the autofill MMKV instance. Move it under Keystore encryption once.
+        val mmkv = getAutofillMMKV(context)
+        val legacy = mmkv.decodeString(CredentialRepository.LEGACY_HD_ROOT_SECRET_KEY) ?: return null
+        val bytes = try {
+            AndroidBase64.decode(legacy, AndroidBase64.URL_SAFE or AndroidBase64.NO_WRAP)
+        } catch (e: IllegalArgumentException) {
+            null
+        }?.takeIf { it.isNotEmpty() } ?: return null
+        try {
+            saveHdRootSecret(context, bytes)
+        } catch (e: Exception) {
+            PasskeyLog.e(CredentialRepository.TAG, "Failed to move the HD root secret under Keystore encryption", e)
+        }
+        return bytes
     }
 
     override fun getMainKeyId(context: Context): String? {
@@ -915,6 +1005,11 @@ class Repository() : CredentialRepository {
         try {
             val mmkvAutofill = getAutofillMMKV(context)
             mmkvAutofill.clearAll()
+            context.getSharedPreferences(CredentialRepository.KEYCHAIN_STORAGE_NAME, Context.MODE_PRIVATE)
+                .edit()
+                .remove(CredentialRepository.HD_ROOT_SECRET_IV_PREF)
+                .remove(CredentialRepository.HD_ROOT_SECRET_CONTENT_PREF)
+                .apply()
 
             // The passkeys instance is the WALLET's key store: it also holds the
             // seed, the roots and every account key, so clearing it wholesale

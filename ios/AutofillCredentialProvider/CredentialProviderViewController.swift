@@ -149,7 +149,7 @@ final class CredentialProviderViewController: ASCredentialProviderViewController
     do {
       guard let store else {
         self.store?.appendDiagnostic("missing wallet root-key state")
-        showFailure("Wallet root key is not available. Open Rocca Wallet once, unlock it, then try again.")
+        showFailure("Wallet root key is not available. Open Akita once, unlock it, then try again.")
         return
       }
 
@@ -316,7 +316,7 @@ final class CredentialProviderViewController: ASCredentialProviderViewController
     }
 
     store?.appendDiagnostic("evaluatePolicy assertion start")
-    context.evaluatePolicy(policy, localizedReason: "Use passkeys with Rocca Wallet") { [weak self] success, authenticationError in
+    context.evaluatePolicy(policy, localizedReason: "Use passkeys with Akita") { [weak self] success, authenticationError in
       DispatchQueue.main.async {
         guard let self else {
           return
@@ -414,7 +414,7 @@ final class CredentialProviderViewController: ASCredentialProviderViewController
     }
 
     store?.appendDiagnostic("evaluatePolicy start")
-    context.evaluatePolicy(policy, localizedReason: "Create passkeys with Rocca Wallet") { [weak self] success, authenticationError in
+    context.evaluatePolicy(policy, localizedReason: "Create passkeys with Akita") { [weak self] success, authenticationError in
       DispatchQueue.main.async {
         guard let self else {
           return

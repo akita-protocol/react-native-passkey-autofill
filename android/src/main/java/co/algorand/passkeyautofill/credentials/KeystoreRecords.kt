@@ -71,6 +71,14 @@ object KeystoreRecords {
      */
     const val SCHEME_BIP32_ED25519 = "bip32-ed25519"
 
+    /**
+     * Akita: the wallet's HD root secret, handed to the provider directly with
+     * `setHdRootSecret` rather than through a key store record. When the wallet
+     * has shared one, new credentials derive from it and are pinned to this
+     * scheme. Mirrors `PasskeyKeystoreRecords.schemeAkitaHdRoot` on iOS.
+     */
+    const val SCHEME_AKITA_HD_ROOT = "akita-hd-root"
+
     /** Prefix for sealed raw-material records: `m/<id>`. */
     const val MATERIAL_PREFIX = "m/"
 

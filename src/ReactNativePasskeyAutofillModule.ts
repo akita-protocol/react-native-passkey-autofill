@@ -24,6 +24,14 @@ declare class ReactNativePasskeyAutofillModule extends NativeModule<ReactNativeP
    * for passkey derivation.
    */
   getMainKeyId(): Promise<string | null>;
+  /**
+   * Akita: shares the wallet's HD root secret with the provider as **raw bytes**.
+   * When set, every new site passkey derives from it (derivation scheme
+   * `akita-hd-root`) instead of a key store record. Stored in the Keychain
+   * (iOS) / under an AndroidKeyStore key (Android), never in plaintext; the
+   * promise rejects if it could not be stored. Zero the array after it resolves.
+   */
+  setHdRootSecret(secret: Uint8Array): Promise<void>;
   /** @deprecated use {@link setMainKeyId} */
   setHdRootKeyId(id: string): Promise<void>;
   /** @deprecated use {@link getMainKeyId} */

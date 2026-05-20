@@ -84,6 +84,12 @@ enum PasskeyKeystoreRecords {
   /// stay pinned to it.
   static let schemeBip32Ed25519 = "bip32-ed25519"
 
+  /// Akita: the wallet's HD root secret, handed to the provider directly with
+  /// `setHdRootSecret` instead of through a key store record. When the wallet
+  /// has shared one, new credentials derive from it and are pinned to this
+  /// scheme, so PRF and any re-derivation keep using the same root.
+  static let schemeAkitaHdRoot = "akita-hd-root"
+
   static func metadataKey(_ id: String) -> String { metadataPrefix + id }
 
   static func materialKey(_ id: String) -> String { materialPrefix + id }
@@ -122,6 +128,9 @@ final class PasskeyCredentialStore {
   /// old one is not mistaken for one that opted into the dp256 main key.
   static let defaultMainKeyIdKey = "ReactNativePasskeyAutofillMainKeyId"
   static let defaultHdRootKeyIdKey = "ReactNativePasskeyAutofillHdRootKeyId"
+  /// Akita: Keychain service (and legacy plaintext UserDefaults key) of the HD
+  /// root secret shared through `setHdRootSecret`.
+  static let defaultHdRootSecretKey = "ReactNativePasskeyAutofillHdRootSecret"
   static let defaultGetPasskeyActionKey = "ReactNativePasskeyAutofillGetPasskeyAction"
   static let defaultCreatePasskeyActionKey = "ReactNativePasskeyAutofillCreatePasskeyAction"
   static let defaultDiagnosticsKey = "ReactNativePasskeyAutofillDiagnostics"
@@ -424,9 +433,13 @@ final class PasskeyCredentialStore {
     defaults.removeObject(forKey: Self.defaultMasterKeyKey)
     defaults.removeObject(forKey: Self.defaultMainKeyIdKey)
     defaults.removeObject(forKey: Self.defaultHdRootKeyIdKey)
+    defaults.removeObject(forKey: Self.defaultHdRootSecretKey)
     defaults.removeObject(forKey: Self.defaultGetPasskeyActionKey)
     defaults.removeObject(forKey: Self.defaultCreatePasskeyActionKey)
     if let query = masterKeyQuery() {
+      _ = SecItemDelete(query as CFDictionary)
+    }
+    if let query = keychainQuery(service: Self.defaultHdRootSecretKey) {
       _ = SecItemDelete(query as CFDictionary)
     }
   }
@@ -484,13 +497,72 @@ final class PasskeyCredentialStore {
   /// prefix), in which case the caller falls back / no-ops rather than writing
   /// to the wrong place.
   private func masterKeyQuery() -> [String: Any]? {
+    keychainQuery(service: Self.defaultMasterKeyKey)
+  }
+
+  /// Base Keychain query for one shared generic-password item in the app/extension
+  /// access group, or `nil` when the group can't be resolved.
+  private func keychainQuery(service: String) -> [String: Any]? {
     guard let accessGroup = masterKeyAccessGroup() else { return nil }
     return [
       kSecClass as String: kSecClassGenericPassword,
-      kSecAttrService as String: Self.defaultMasterKeyKey,
-      kSecAttrAccount as String: Self.defaultMasterKeyKey,
+      kSecAttrService as String: service,
+      kSecAttrAccount as String: service,
       kSecAttrAccessGroup as String: accessGroup,
     ]
+  }
+
+  // MARK: - Akita HD root secret (Keychain-backed)
+  //
+  // Akita shares its wallet HD root with the provider directly rather than as a
+  // key store record. It is a root secret, so it gets the same treatment as the
+  // master key: the shared Keychain group, `AfterFirstUnlockThisDeviceOnly`, never
+  // plaintext UserDefaults (where builds before this one kept it).
+
+  /// Stores the HD root secret. Fails closed: if the Keychain write cannot be
+  /// read back, it throws instead of leaving the wallet believing the root is set.
+  func saveHdRootSecret(_ secret: Data) throws {
+    guard !secret.isEmpty else {
+      throw PasskeyCredentialStoreError.parentMaterialUnavailable(PasskeyKeystoreRecords.schemeAkitaHdRoot)
+    }
+    guard var query = keychainQuery(service: Self.defaultHdRootSecretKey) else {
+      throw PasskeyCredentialStoreError.appGroupUnavailable
+    }
+    _ = SecItemDelete(query as CFDictionary)
+    query[kSecValueData as String] = secret
+    query[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+    let status = SecItemAdd(query as CFDictionary, nil)
+    defaults.removeObject(forKey: Self.defaultHdRootSecretKey)
+    guard status == errSecSuccess, hdRootSecret() == secret else {
+      throw PasskeyCredentialStoreError.credentialStorageFailed
+    }
+  }
+
+  /// The HD root secret the wallet shared with `setHdRootSecret`, if any.
+  func hdRootSecret() -> Data? {
+    if var query = keychainQuery(service: Self.defaultHdRootSecretKey) {
+      query[kSecReturnData as String] = true
+      query[kSecMatchLimit as String] = kSecMatchLimitOne
+      var item: CFTypeRef?
+      if SecItemCopyMatching(query as CFDictionary, &item) == errSecSuccess,
+         let data = item as? Data,
+         !data.isEmpty
+      {
+        return data
+      }
+    }
+    // Migration: earlier Akita builds kept the root as plaintext base64url in the
+    // App Group UserDefaults. Move it into the Keychain and scrub the plaintext.
+    if let legacy = defaults.string(forKey: Self.defaultHdRootSecretKey),
+       let data = Data(base64URLEncoded: legacy) ?? Data(base64Encoded: legacy),
+       !data.isEmpty
+    {
+      if (try? saveHdRootSecret(data)) == nil {
+        appendDiagnostic("could not move the HD root secret into the Keychain")
+      }
+      return data
+    }
+    return nil
   }
 
   /// The full keychain access group (`<TeamID>.<base>`). The base is injected by
@@ -583,6 +655,21 @@ final class PasskeyCredentialStore {
     guard let appGroup = Bundle.main.object(forInfoDictionaryKey: Self.defaultSuiteNameKey) as? String
     else {
       throw PasskeyCredentialStoreError.appGroupUnavailable
+    }
+
+    // Akita: a root shared through `setHdRootSecret` is the parent for every new
+    // credential and for every credential pinned to it.
+    if scheme == nil || scheme == PasskeyKeystoreRecords.schemeAkitaHdRoot {
+      if let root = hdRootSecret() {
+        return PasskeyParentSecret(
+          keyId: mainKeyId() ?? PasskeyKeystoreRecords.schemeAkitaHdRoot,
+          scheme: PasskeyKeystoreRecords.schemeAkitaHdRoot,
+          bytes: root
+        )
+      }
+      if scheme != nil {
+        throw PasskeyCredentialStoreError.parentKeyUnavailable(scheme)
+      }
     }
 
     let candidates = parentKeyCandidates(masterKey: masterKey, appGroup: appGroup)

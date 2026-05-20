@@ -15,7 +15,7 @@ Pod::Spec.new do |s|
     :tvos => '15.1'
   }
   s.swift_version  = '5.9'
-  s.source         = { git: 'https://github.com/algorandfoundation/react-native-passkey-autofill' }
+  s.source         = { git: 'https://github.com/akita-protocol/react-native-passkey-autofill' }
   s.static_framework = true
 
   s.dependency 'ExpoModulesCore'

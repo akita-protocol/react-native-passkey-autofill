@@ -6,7 +6,7 @@ module.exports = async (env, argv) => {
     {
       ...env,
       babel: {
-        dangerouslyAddModulePathsToTranspile: ["@algorandfoundation/react-native-passkey-autofill"],
+        dangerouslyAddModulePathsToTranspile: ["@akta/react-native-passkey-autofill"],
       },
     },
     argv,

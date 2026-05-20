@@ -192,7 +192,7 @@ const extensionInfoPlist = ({
 ${aaguid ? `  <key>ReactNativePasskeyAutofillAAGUID</key>\n  <string>${aaguid}</string>\n` : ""}  <key>${IOS_BIOMETRIC_INFO_PLIST_KEY}</key>
   <string>${biometricRequirement}</string>
   <key>NSFaceIDUsageDescription</key>
-  <string>Rocca uses Face ID to create and use passkeys.</string>
+  <string>${label} uses Face ID to create and use passkeys.</string>
   <key>NSExtension</key>
   <dict>
     <key>ASCredentialProviderExtensionSupportedDomains</key>
@@ -351,18 +351,19 @@ const withIosPasskeyAutofill = (config, props = {}) => {
         MARKETING_VERSION: `"${config.version || "1.0.0"}"`,
         PASSKEY_AUTOFILL_APP_GROUP: `"${appGroup}"`,
         PASSKEY_AUTOFILL_KEYCHAIN_GROUP: `"${keychainGroup}"`,
+        GCC_PREPROCESSOR_DEFINITIONS: ['"$(inherited)"', "FORCE_POSIX"],
         PRODUCT_BUNDLE_IDENTIFIER: `"${bundleIdentifier}"`,
         SWIFT_ACTIVE_COMPILATION_CONDITIONS: "PASSKEY_AUTOFILL_EXTENSION",
         HEADER_SEARCH_PATHS: [
           '"$(inherited)"',
           '"$(SRCROOT)/Pods/Headers/Public"',
-          '"$(SRCROOT)/Pods/Headers/Public/MMKVCore"',
+          '"$(SRCROOT)/Pods/Headers/Public/react-native-mmkv"',
         ],
         LIBRARY_SEARCH_PATHS: [
           '"$(inherited)"',
-          '"$(BUILD_DIR)/$(CONFIGURATION)$(EFFECTIVE_PLATFORM_NAME)/MMKVCore"',
+          '"$(BUILD_DIR)/$(CONFIGURATION)$(EFFECTIVE_PLATFORM_NAME)/react-native-mmkv"',
         ],
-        OTHER_LDFLAGS: ['"$(inherited)"', '"-lMMKVCore"', '"-lc++"', '"-lz"'],
+        OTHER_LDFLAGS: ['"$(inherited)"', '"-lreact-native-mmkv"', '"-lc++"', '"-lz"'],
         SWIFT_OBJC_BRIDGING_HEADER: `"${IOS_EXTENSION_NAME}/PasskeyAutofillCredentialProvider-Bridging-Header.h"`,
         SWIFT_VERSION: "5.9",
       });

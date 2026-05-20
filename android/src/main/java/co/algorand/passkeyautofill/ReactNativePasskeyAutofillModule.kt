@@ -22,6 +22,9 @@ import java.security.Security
  */
 class MasterKeyException(message: String, cause: Throwable? = null) : CodedException(message, cause)
 
+/** Rejects `setHdRootSecret` with code `ERR_HD_ROOT_SECRET` when the secret could not be stored. */
+class HdRootSecretException(message: String, cause: Throwable? = null) : CodedException(message, cause)
+
 class ReactNativePasskeyAutofillModule : Module() {
   private val credentialRepository = CredentialRepository()
 
@@ -77,6 +80,19 @@ class ReactNativePasskeyAutofillModule : Module() {
         credentialRepository.saveMainKeyId(context, id)
       } else {
         PasskeyLog.e(CredentialRepository.TAG, "Could not get context to save main key ID")
+      }
+    }
+
+    // Akita: shares the wallet's HD root secret directly. New passkeys derive from
+    // it (scheme `akita-hd-root`). Fails closed like `setMasterKey`.
+    AsyncFunction("setHdRootSecret") { secret: ByteArray ->
+      val context = (appContext.reactContext ?: appContext.hostingRuntimeContext) as? Context
+        ?: throw HdRootSecretException("Could not get context to save the HD root secret")
+      try {
+        credentialRepository.saveHdRootSecret(context, secret)
+      } catch (e: Exception) {
+        PasskeyLog.e(CredentialRepository.TAG, "Failed to save HD root secret", e)
+        throw HdRootSecretException(e.message ?: "Failed to save HD root secret", e)
       }
     }
 
