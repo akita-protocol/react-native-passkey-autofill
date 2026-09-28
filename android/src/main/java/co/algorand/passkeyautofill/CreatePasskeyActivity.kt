@@ -29,6 +29,7 @@ import co.algorand.passkeyautofill.credentials.CredentialRepository
 import co.algorand.passkeyautofill.credentials.Credential
 import co.algorand.passkeyautofill.credentials.MasterKeyUnavailableException
 import co.algorand.passkeyautofill.utils.PasskeyUtils
+import co.algorand.passkeyautofill.utils.PrivilegedBrowserAllowlist
 import java.security.KeyPair
 import android.util.Base64 as AndroidBase64
 import androidx.biometric.BiometricPrompt
@@ -49,6 +50,8 @@ class CreatePasskeyActivity : AppCompatActivity() {
 
     private var origin: String = "unknown-origin" // Derivation origin (rpId or hash)
     private var displayOrigin: String = "unknown-origin"
+    /** The verified web origin when the caller is an allow-listed privileged browser; null for every ordinary app. */
+    private var privilegedOrigin: String? = null
     private var userHandle: String = "unknown-user"
     private var userName: String = "User"
     private var userId: String = "unknown-id"
@@ -108,6 +111,12 @@ class CreatePasskeyActivity : AppCompatActivity() {
 
         if (request != null) {
             try {
+                // A caller-asserted web origin is trusted only for an allow-listed
+                // privileged browser; everyone else is bound to their app identity.
+                val allowlist = PrivilegedBrowserAllowlist.json(this)
+                privilegedOrigin = allowlist?.let {
+                    credentialRepository.getPrivilegedOrigin(request!!.callingAppInfo, it)
+                }
                 val systemOrigin = credentialRepository.getOrigin(request!!.callingAppInfo)
                 origin = systemOrigin
                 displayOrigin = systemOrigin
@@ -403,11 +412,16 @@ class CreatePasskeyActivity : AppCompatActivity() {
                 "Relying party requires user verification but no verification ceremony completed"
             }
             PasskeyLog.d(TAG, "Building AuthenticatorAttestationResponse (uv=${verification.verified})")
+            // The origin the registration is bound to: the verified web origin
+            // for an allow-listed privileged browser, otherwise the caller's
+            // android:apk-key-hash: identity. This is independent of `origin`,
+            // which stays the derivation origin (rpId) so keys re-derive stably.
+            val responseOrigin = privilegedOrigin ?: credentialRepository.getOrigin(req.callingAppInfo)
             val response = AuthenticatorAttestationResponse(
                 requestOptions = requestOptions,
                 credentialId = credentialId,
                 credentialPublicKey = credentialRepository.getPublicKeyFromKeyPair(keyPair),
-                origin = credentialRepository.getOrigin(req.callingAppInfo),
+                origin = responseOrigin,
                 up = true,
                 uv = verification.verified,
                 be = true,
@@ -426,7 +440,7 @@ class CreatePasskeyActivity : AppCompatActivity() {
             val respJson = fullJson.getJSONObject("response")
 
             // Ensure compact clientDataJSON for registration too
-            val sanitizedOrigin = credentialRepository.getOrigin(req.callingAppInfo).replace(Regex("/$"), "")
+            val sanitizedOrigin = responseOrigin.replace(Regex("/$"), "")
             val challenge = if (requestJson.has("publicKey")) {
                 requestJson.getJSONObject("publicKey").getString("challenge")
             } else {

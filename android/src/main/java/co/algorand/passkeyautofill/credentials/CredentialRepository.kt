@@ -108,6 +108,24 @@ interface CredentialRepository {
     fun appInfoToOrigin(info: CallingAppInfo): String
 
     /**
+     * The real web origin of a caller that is an allow-listed privileged
+     * browser (one holding `CREDENTIAL_MANAGER_SET_ORIGIN` and present in
+     * [privilegedAllowlist]), or `null` for every ordinary app.
+     *
+     * This is the only place a caller-asserted origin (and, by extension, a
+     * caller-supplied `clientDataHash`) may be trusted. It delegates to
+     * [CallingAppInfo.getOrigin], whose contract is:
+     *  - returns the web origin when the caller set one AND is on the allowlist;
+     *  - returns `null` when the caller set no origin (the common native case);
+     *  - throws [IllegalStateException] when a non-allow-listed caller tries to
+     *    assert an origin (a spoofing attempt), which we swallow into `null` so
+     *    the assertion falls back to the caller's `android:apk-key-hash:` origin.
+     *
+     * @param privilegedAllowlist the FIDO/GPM privileged-apps JSON allowlist.
+     */
+    fun getPrivilegedOrigin(info: CallingAppInfo, privilegedAllowlist: String): String?
+
+    /**
      * The credential stored under `credentialId` WITH its private material
      * (`privateKey`), opening the biometric wrapper with `biometricCipher` when
      * the record has one. This is the only read that materialises a private
@@ -1103,6 +1121,21 @@ class Repository() : CredentialRepository {
     @RequiresApi(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
     override fun getOrigin(info: CallingAppInfo): String {
         return appInfoToOrigin(info)
+    }
+
+    @RequiresApi(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
+    override fun getPrivilegedOrigin(info: CallingAppInfo, privilegedAllowlist: String): String? {
+        return try {
+            info.getOrigin(privilegedAllowlist)
+        } catch (e: IllegalStateException) {
+            // A non-allow-listed caller asserted an origin: treat as spoofing
+            // and fall back to the app-bound origin.
+            PasskeyLog.w(CredentialRepository.TAG, "Caller asserted an origin but is not an allow-listed privileged browser; ignoring it")
+            null
+        } catch (e: Exception) {
+            PasskeyLog.w(CredentialRepository.TAG, "Failed to resolve privileged browser origin; treating caller as non-privileged", e)
+            null
+        }
     }
 
     @RequiresApi(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)

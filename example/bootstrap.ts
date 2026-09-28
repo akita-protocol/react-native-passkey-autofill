@@ -6,17 +6,30 @@ import { keyStore } from "./stores/keystore";
 import { passkeysStore } from "./stores/passkeys";
 
 /**
+ * Fetches a single secret, tolerating entries this build cannot decrypt.
+ *
+ * The keystore MMKV is shared (multi-process) and may hold records sealed by a
+ * different payload format than this example's keystore dependency understands
+ * (e.g. AES-GCM with the auth tag appended to the ciphertext instead of a
+ * separate `tag` field). Decrypting such a record throws; we swallow that so a
+ * single unreadable entry never aborts a full reload; the readable keys still
+ * load and flows like passkey registration can complete.
+ */
+async function safeFetchSecret(keyId: string): Promise<KeyData | null> {
+  try {
+    return await fetchSecret<KeyData>({ keyId, options: { masterKey: await getMasterKey() } });
+  } catch (e) {
+    console.warn(`Skipping undecryptable keystore entry ${keyId}`, e);
+    return null;
+  }
+}
+
+/**
  * This is required when a key is modified outside of our control
  * This eventually will just be a part of the passkey extension.
  */
 export async function fullReload() {
-  const secrets = await Promise.all(
-    storage
-      .getAllKeys()
-      .map(async (keyId) =>
-        fetchSecret<KeyData>({ keyId, options: { masterKey: await getMasterKey() } }),
-      ),
-  );
+  const secrets = await Promise.all(storage.getAllKeys().map((keyId) => safeFetchSecret(keyId)));
   const keys = secrets
     .filter((k) => k !== null)
     .map(({ privateKey: _privateKey, ...rest }: KeyData) => rest) as Key[];
@@ -37,13 +50,7 @@ export async function bootstrap() {
   // Reload keys into the JS store
   await fullReload();
 
-  const secrets = await Promise.all(
-    storage
-      .getAllKeys()
-      .map(async (keyId) =>
-        fetchSecret<KeyData>({ keyId, options: { masterKey: await getMasterKey() } }),
-      ),
-  );
+  const secrets = await Promise.all(storage.getAllKeys().map((keyId) => safeFetchSecret(keyId)));
 
   const keys = secrets
     .filter((k) => k !== null)
