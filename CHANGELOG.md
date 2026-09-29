@@ -1,3 +1,9 @@
+# [1.0.0-canary.28](https://github.com/algorandfoundation/react-native-passkey-autofill/compare/v1.0.0-canary.27...v1.0.0-canary.28) (2026-09-29)
+
+### Bug Fixes
+
+- restrict client hash to privileged list ([d17cea0](https://github.com/algorandfoundation/react-native-passkey-autofill/commit/d17cea058745b5de0103d4ccd767885a2d185981))
+
 # [1.0.0-canary.27](https://github.com/algorandfoundation/react-native-passkey-autofill/compare/v1.0.0-canary.26...v1.0.0-canary.27) (2026-09-22)
 
 ### Bug Fixes
