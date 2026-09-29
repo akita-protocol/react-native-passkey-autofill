@@ -31,6 +31,7 @@ import co.algorand.passkeyautofill.credentials.CredentialRepository
 import co.algorand.passkeyautofill.credentials.Credential
 import co.algorand.passkeyautofill.credentials.RelyingParty
 import co.algorand.passkeyautofill.utils.PasskeyUtils
+import co.algorand.passkeyautofill.utils.PrivilegedBrowserAllowlist
 import android.util.Base64 as AndroidBase64
 import com.tencent.mmkv.MMKV
 import javax.crypto.Cipher
@@ -82,6 +83,10 @@ class PasskeyAutofillCredentialProviderService: CredentialProviderService() {
     ) {
         PasskeyLog.init(this)
         stampActivated(this)
+        // Opportunistically keep the privileged-browser allowlist current so a
+        // rotated-out (e.g. compromised) browser stops being trusted; never
+        // blocks this callback.
+        PrivilegedBrowserAllowlist.refreshIfStale(this)
         val response: BeginCreateCredentialResponse? = processCreateCredentialRequest(request)
         if (response != null) {
             callback.onResult(response)
@@ -170,6 +175,10 @@ class PasskeyAutofillCredentialProviderService: CredentialProviderService() {
     ) {
         PasskeyLog.init(this)
         stampActivated(this)
+        // Opportunistically keep the privileged-browser allowlist current so a
+        // rotated-out (e.g. compromised) browser stops being trusted; never
+        // blocks this callback.
+        PrivilegedBrowserAllowlist.refreshIfStale(this)
         try {
             val response = processGetCredentialRequest(request)
             callback.onResult(response)

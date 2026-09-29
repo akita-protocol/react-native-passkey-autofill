@@ -31,6 +31,7 @@ import co.algorand.passkeyautofill.credentials.KeystoreRecords
 import co.algorand.passkeyautofill.credentials.ParentSecretResult
 import co.algorand.passkeyautofill.credentials.RelyingParty
 import co.algorand.passkeyautofill.utils.PasskeyUtils
+import co.algorand.passkeyautofill.utils.PrivilegedBrowserAllowlist
 import java.security.KeyPair
 import java.security.MessageDigest
 import android.util.Base64 as AndroidBase64
@@ -53,6 +54,8 @@ class GetPasskeyActivity : AppCompatActivity() {
 
     private var origin: String = "unknown-origin"
     private var displayOrigin: String = "unknown-origin"
+    /** The verified web origin when the caller is an allow-listed privileged browser; null for every ordinary app. */
+    private var privilegedOrigin: String? = null
     private var userHandle: String = "unknown-user"
     private var credentialIdEnc: String? = null
     private var userVerification: String = "preferred"
@@ -112,7 +115,13 @@ class GetPasskeyActivity : AppCompatActivity() {
         }
 
         if (request != null) {
-            origin = credentialRepository.getOrigin(request!!.callingAppInfo)
+            // A caller-asserted web origin is trusted only for an allow-listed
+            // privileged browser; everyone else is bound to their app identity.
+            val allowlist = PrivilegedBrowserAllowlist.json(this)
+            privilegedOrigin = allowlist?.let {
+                credentialRepository.getPrivilegedOrigin(request!!.callingAppInfo, it)
+            }
+            origin = privilegedOrigin ?: credentialRepository.getOrigin(request!!.callingAppInfo)
             displayOrigin = origin
             
             // Try to extract rpId for better display
@@ -505,7 +514,20 @@ class GetPasskeyActivity : AppCompatActivity() {
                 json.toString()
             }
 
-            val clientDataHash = systemClientDataHash ?: MessageDigest.getInstance("SHA-256").digest(clientDataJSONString.toByteArray(Charsets.UTF_8))
+            // Only an allow-listed privileged browser may have its own
+            // clientDataHash (and web origin) trusted. For every other caller we
+            // IGNORE any supplied hash and sign OUR OWN hash of the app-bound
+            // clientDataJSON, so the assertion is bound to the caller's
+            // android:apk-key-hash: identity and a foreign RP rejects it.
+            val trustSystemHash = privilegedOrigin != null && systemClientDataHash != null
+            if (systemClientDataHash != null && !trustSystemHash) {
+                PasskeyLog.w(TAG, "Ignoring caller-supplied clientDataHash from non-privileged caller; binding assertion to app origin")
+            }
+            val clientDataHash = if (trustSystemHash) {
+                systemClientDataHash!!
+            } else {
+                MessageDigest.getInstance("SHA-256").digest(clientDataJSONString.toByteArray(Charsets.UTF_8))
+            }
 
             // Metadata only: everything the response needs before signing (user
             // handle, derivation pins) is read without touching the private key.
@@ -591,7 +613,13 @@ class GetPasskeyActivity : AppCompatActivity() {
 
             val fullJson = JSONObject(fidoCredential.json())
             val respJson = fullJson.getJSONObject("response")
-            respJson.put("clientDataJSON", clientDataJSONb64)
+            // When a privileged browser's own hash was signed, our clientDataJSON
+            // is not what was signed (the browser supplies its own), so we do not
+            // attach it. For all app-bound callers we attach the clientDataJSON
+            // whose hash we signed.
+            if (!trustSystemHash) {
+                respJson.put("clientDataJSON", clientDataJSONb64)
+            }
             respJson.put("signature", signatureb64)
 
             // Add clientExtensionResults as seen in the example

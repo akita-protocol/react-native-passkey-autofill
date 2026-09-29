@@ -234,7 +234,10 @@ function AppContent() {
       await fullReload();
 
       if (ed25519Key && ed25519Key.publicKey) {
-        const challenge = fromBase64Url(options.challenge);
+        // The attestation options are a WebAuthn PublicKeyCredentialCreationOptions
+        // wrapped in `publicKey`; fall back to a flat shape just in case.
+        const challengeB64Url = options?.publicKey?.challenge ?? options?.challenge;
+        const challenge = fromBase64Url(challengeB64Url);
         const signature = await key.store.sign(xhdEd25519KeyId, challenge);
 
         result.clientExtensionResults = {
