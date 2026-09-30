@@ -18,8 +18,12 @@
                 android:name="android.credentials.provider"
                 android:resource="@xml/provider" />
         </service>
-        <activity android:name="co.algorand.passkeyautofill.GetPasskeyActivity" 
-            android:exported="true" 
+        <!--
+          Not exported: both activities trust the extras they are started with, so only the
+          provider service's own PendingIntent (explicit component, this app's UID) may start them.
+        -->
+        <activity android:name="co.algorand.passkeyautofill.GetPasskeyActivity"
+            android:exported="false"
             android:launchMode="singleTop"
             android:theme="@style/Theme.PasskeyAutofill.Dialog">
             <intent-filter>
@@ -27,8 +31,8 @@
                 <category android:name="android.intent.category.DEFAULT"/>
             </intent-filter>
         </activity>
-        <activity android:name="co.algorand.passkeyautofill.CreatePasskeyActivity" 
-            android:exported="true" 
+        <activity android:name="co.algorand.passkeyautofill.CreatePasskeyActivity"
+            android:exported="false"
             android:launchMode="singleTop"
             android:theme="@style/Theme.PasskeyAutofill.Dialog">
             <intent-filter>
