@@ -1,3 +1,9 @@
+# [1.0.0-canary.29](https://github.com/algorandfoundation/react-native-passkey-autofill/compare/v1.0.0-canary.28...v1.0.0-canary.29) (2026-09-30)
+
+### Bug Fixes
+
+- **android:** stop exporting the passkey activities ([dfb376e](https://github.com/algorandfoundation/react-native-passkey-autofill/commit/dfb376e84aeef3fea36d742fa338dcefde153b3e))
+
 # [1.0.0-canary.28](https://github.com/algorandfoundation/react-native-passkey-autofill/compare/v1.0.0-canary.27...v1.0.0-canary.28) (2026-09-29)
 
 ### Bug Fixes
