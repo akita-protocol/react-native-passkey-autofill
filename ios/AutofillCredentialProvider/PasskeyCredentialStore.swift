@@ -18,11 +18,18 @@ enum PasskeyCredentialStoreError: Error {
 /// synced passkeys. Android (SiteCredentialDerivation.kt) and the desktop app
 /// implement the same rule; test-vectors/site-credential-vectors.json pins it.
 ///
-///   handle = lowercase(utf8(user.id) ?: base64url(user.id))
+///   handle = lowercase(user.name), one code point at a time
 ///   d = SHA-512(root ‖ rpId ‖ handle ‖ BE32(attempt))[0..32], first valid attempt
+///
+/// user.name (rather than the opaque user.id) is deliberate: it is something a
+/// person can supply again during recovery. Passkeys created before this rule
+/// (iOS derived from user.id) keep working from their stored keys, and sync
+/// records carry the exact handle each passkey used.
 enum SiteCredentialDerivation {
-  static func canonicalUserHandle(_ userId: Data) -> String {
-    (String(data: userId, encoding: .utf8) ?? userId.base64URLEncodedString()).lowercased()
+  /// Swift's lowercased() maps each code point on its own (no context rules such
+  /// as Greek final sigma), which Android and JavaScript reproduce exactly.
+  static func handle(forUserName userName: String) -> String {
+    userName.lowercased()
   }
 
   static func privateKey(rootSecret: Data, rpId: String, handle: String) throws -> P256.Signing.PrivateKey {

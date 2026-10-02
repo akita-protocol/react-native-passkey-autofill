@@ -2,8 +2,6 @@ package co.algorand.passkeyautofill.credentials
 
 import java.math.BigInteger
 import java.nio.ByteBuffer
-import java.nio.charset.CharacterCodingException
-import java.nio.charset.CodingErrorAction
 import java.security.AlgorithmParameters
 import java.security.KeyFactory
 import java.security.KeyPair
@@ -19,30 +17,29 @@ import org.bouncycastle.jce.ECNamedCurveTable
 /**
  * Derives the P-256 key for a site passkey from the wallet's HD root secret.
  *
- * This must match the iOS provider (CredentialProviderViewController.domainSpecificKeyPair
- * and ASPasskeyCredentialIdentity.userHandleString) byte for byte, so that a passkey created
- * through Akita on one platform can be re-derived on any other. The test vectors in
- * src/test come from running the iOS code.
+ * This must match the iOS provider (SiteCredentialDerivation in
+ * PasskeyCredentialStore.swift) byte for byte, so a passkey created through Akita
+ * on one platform can be re-derived on any other. The test vectors in src/test
+ * come from running the iOS code.
  *
- *   handle = lowercase(utf8(user.id) ?: base64url(user.id))
+ *   handle = lowercase(user.name), one code point at a time
  *   digest = SHA-512(root ‖ utf8(rpId) ‖ utf8(handle) ‖ BE32(attempt))
  *   d      = digest[0..32], for the first attempt in 0..15 where 1 ≤ d < n
+ *
+ * user.name (rather than the opaque user.id) is deliberate: it is something a
+ * person can supply again during recovery.
  */
 object SiteCredentialDerivation {
     private const val MAX_ATTEMPTS = 16
     private val CURVE = ECNamedCurveTable.getParameterSpec("secp256r1")
-    private val UTF8_BOM = byteArrayOf(0xEF.toByte(), 0xBB.toByte(), 0xBF.toByte())
 
     /**
-     * The derivation input for a site's WebAuthn user.id, matching iOS: the bytes as UTF-8
-     * text when they are valid UTF-8 (Foundation drops a leading byte-order mark), otherwise
-     * unpadded base64url. Lowercased one code point at a time, like Swift's
-     * String.lowercased(), which applies no context rules such as Greek final sigma.
+     * The derivation input for a site's WebAuthn user.name. Lowercased one code
+     * point at a time, like Swift's String.lowercased(): Kotlin's String.lowercase()
+     * applies the Greek final-sigma context rule (and differs from ICU on it), so
+     * it would not match iOS.
      */
-    fun canonicalUserHandle(userId: ByteArray): String {
-        val text = decodeUtf8OrNull(userId) ?: base64UrlNoPadding(userId)
-        return lowercasePerCodePoint(text)
-    }
+    fun handleForUserName(userName: String): String = lowercasePerCodePoint(userName)
 
     /** Returns the private scalar and the attempt counter that produced it. */
     fun derivePrivateScalar(rootSecret: ByteArray, rpId: String, userHandle: String): Pair<BigInteger, Int> {
@@ -69,22 +66,6 @@ object SiteCredentialDerivation {
         return KeyPair(publicKey, privateKey)
     }
 
-    private fun decodeUtf8OrNull(bytes: ByteArray): String? {
-        val body = if (bytes.size >= 3 && bytes.copyOfRange(0, 3).contentEquals(UTF8_BOM)) {
-            bytes.copyOfRange(3, bytes.size)
-        } else {
-            bytes
-        }
-        val decoder = Charsets.UTF_8.newDecoder()
-            .onMalformedInput(CodingErrorAction.REPORT)
-            .onUnmappableCharacter(CodingErrorAction.REPORT)
-        return try {
-            decoder.decode(ByteBuffer.wrap(body)).toString()
-        } catch (e: CharacterCodingException) {
-            null
-        }
-    }
-
     private fun lowercasePerCodePoint(text: String): String {
         val out = StringBuilder(text.length)
         var i = 0
@@ -93,25 +74,6 @@ object SiteCredentialDerivation {
             // A single code point has no neighbours, so context rules never apply.
             out.append(String(Character.toChars(codePoint)).lowercase(Locale.ROOT))
             i += Character.charCount(codePoint)
-        }
-        return out.toString()
-    }
-
-    // java.util.Base64 needs API 26 and this module supports API 24.
-    private const val BASE64URL = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
-
-    private fun base64UrlNoPadding(bytes: ByteArray): String {
-        val out = StringBuilder((bytes.size * 4 + 2) / 3)
-        var i = 0
-        while (i < bytes.size) {
-            val b0 = bytes[i].toInt() and 0xFF
-            val b1 = if (i + 1 < bytes.size) bytes[i + 1].toInt() and 0xFF else -1
-            val b2 = if (i + 2 < bytes.size) bytes[i + 2].toInt() and 0xFF else -1
-            out.append(BASE64URL[b0 ushr 2])
-            out.append(BASE64URL[((b0 and 0x03) shl 4) or (if (b1 >= 0) b1 ushr 4 else 0)])
-            if (b1 >= 0) out.append(BASE64URL[((b1 and 0x0F) shl 2) or (if (b2 >= 0) b2 ushr 6 else 0)])
-            if (b2 >= 0) out.append(BASE64URL[b2 and 0x3F])
-            i += 3
         }
         return out.toString()
     }

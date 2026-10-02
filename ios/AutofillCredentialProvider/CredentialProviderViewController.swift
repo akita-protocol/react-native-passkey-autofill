@@ -154,7 +154,7 @@ final class CredentialProviderViewController: ASCredentialProviderViewController
       let privateKey = try SiteCredentialDerivation.privateKey(
         rootSecret: derivedParentSecret,
         rpId: identity.relyingPartyIdentifier,
-        handle: SiteCredentialDerivation.canonicalUserHandle(identity.userHandle)
+        handle: SiteCredentialDerivation.handle(forUserName: identity.userName)
       )
       let publicKey = privateKey.publicKey.derRepresentation
       let credentialId = WebAuthn.credentialId(publicKey: publicKey)

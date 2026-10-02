@@ -29,7 +29,7 @@ interface CredentialRepository {
     fun saveCredential(context: Context, credential: Credential, biometricCipher: Cipher? = null)
     fun generateCredentialId(keyPair: KeyPair): ByteArray
     fun getKeyPair(context: Context, credentialId: ByteArray, biometricCipher: Cipher? = null): KeyPair?
-    /** [userHandle] must be SiteCredentialDerivation.canonicalUserHandle(user.id) so keys match iOS. */
+    /** [userHandle] must be SiteCredentialDerivation.handleForUserName(user.name) so keys match iOS. */
     fun createDeterministicKeyPair(context: Context, origin: String, userHandle: String, biometricCipher: Cipher? = null): KeyPair
     fun getOrigin(info: CallingAppInfo): String
     fun appInfoToOrigin(info: CallingAppInfo): String
