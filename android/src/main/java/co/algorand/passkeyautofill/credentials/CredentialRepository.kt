@@ -89,6 +89,7 @@ interface CredentialRepository {
     fun saveCredential(context: Context, credential: Credential, biometricCipher: Cipher? = null)
     fun generateCredentialId(keyPair: KeyPair): ByteArray
     fun getKeyPair(context: Context, credentialId: ByteArray, biometricCipher: Cipher? = null): KeyPair?
+    /** Akita: when the HD root is the parent, [userHandle] is the SiteCredentialDerivation handle, used verbatim. */
     fun createDeterministicKeyPair(context: Context, origin: String, userHandle: String, biometricCipher: Cipher? = null): KeyPair
 
     /**
@@ -97,12 +98,16 @@ interface CredentialRepository {
      *
      * @param requestedScheme the scheme an EXISTING credential is pinned to;
      *   `null` for a new credential, which then prefers the dp256 main key.
+     * @param siteHandle Akita: the [SiteCredentialDerivation] handle, used verbatim
+     *   when the parent is the wallet's HD root ([KeystoreRecords.SCHEME_AKITA_HD_ROOT]).
+     *   Derivation from that root fails without one.
      */
     fun createDomainKeyPair(
         context: Context,
         origin: String,
         userHandle: String,
         requestedScheme: String? = null,
+        siteHandle: String? = null,
     ): DerivedDomainKeyPair
     fun getOrigin(info: CallingAppInfo): String
     fun appInfoToOrigin(info: CallingAppInfo): String
@@ -622,6 +627,7 @@ class Repository() : CredentialRepository {
                 credential.origin,
                 credential.userHandle,
                 credential.derivationScheme ?: KeystoreRecords.SCHEME_BIP32_ED25519,
+                siteHandle = siteHandleOf(credential),
             ).keyPair
         } catch (e: Exception) {
             PasskeyLog.e(CredentialRepository.TAG, "Failed to re-derive key pair for credential", e)
@@ -634,13 +640,14 @@ class Repository() : CredentialRepository {
         origin: String,
         userHandle: String,
         biometricCipher: Cipher?
-    ): KeyPair = createDomainKeyPair(context, origin, userHandle).keyPair
+    ): KeyPair = createDomainKeyPair(context, origin, userHandle, siteHandle = userHandle).keyPair
 
     override fun createDomainKeyPair(
         context: Context,
         origin: String,
         userHandle: String,
         requestedScheme: String?,
+        siteHandle: String?,
     ): DerivedDomainKeyPair {
         PasskeyLog.d(CredentialRepository.TAG, "createDomainKeyPair (scheme: ${requestedScheme ?: "preferred"})")
         val resolved = resolveParentSecret(context, requestedScheme)
@@ -655,11 +662,31 @@ class Repository() : CredentialRepository {
         }
         val parent = resolved.secret
         PasskeyLog.d(CredentialRepository.TAG, "deriving from parent ${parent.keyId} (${parent.scheme}, ${parent.bytes.size} bytes)")
+        if (parent.scheme == KeystoreRecords.SCHEME_AKITA_HD_ROOT) {
+            // Akita site passkeys: byte-for-byte the iOS derivation, pinned by the
+            // shared test vectors (see SiteCredentialDerivation).
+            val handle = siteHandle
+                ?: throw IllegalStateException("Cannot derive a passkey: no site derivation handle for the HD root")
+            return DerivedDomainKeyPair(
+                keyPair = SiteCredentialDerivation.deriveKeyPair(parent.bytes, origin, handle),
+                parentKeyId = parent.keyId,
+                derivationScheme = parent.scheme,
+            )
+        }
         return DerivedDomainKeyPair(
             keyPair = dP256.genDomainSpecificKeypair(parent.bytes, origin, userHandle.lowercase()),
             parentKeyId = parent.keyId,
             derivationScheme = parent.scheme,
         )
+    }
+
+    /** Akita: the [SiteCredentialDerivation] handle a stored credential was created with. */
+    private fun siteHandleOf(credential: Credential): String? = try {
+        SiteCredentialDerivation.canonicalUserHandle(
+            AndroidBase64.decode(credential.userId, AndroidBase64.URL_SAFE or AndroidBase64.NO_WRAP or AndroidBase64.NO_PADDING)
+        )
+    } catch (e: IllegalArgumentException) {
+        null
     }
 
     override fun resolveParentSecret(context: Context, requestedScheme: String?): ParentSecretResult {

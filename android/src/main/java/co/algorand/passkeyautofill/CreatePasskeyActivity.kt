@@ -28,6 +28,7 @@ import co.algorand.passkeyautofill.auth.UserVerification
 import co.algorand.passkeyautofill.credentials.CredentialRepository
 import co.algorand.passkeyautofill.credentials.Credential
 import co.algorand.passkeyautofill.credentials.MasterKeyUnavailableException
+import co.algorand.passkeyautofill.credentials.SiteCredentialDerivation
 import co.algorand.passkeyautofill.utils.PasskeyUtils
 import co.algorand.passkeyautofill.utils.PrivilegedBrowserAllowlist
 import java.security.KeyPair
@@ -364,7 +365,15 @@ class CreatePasskeyActivity : AppCompatActivity() {
             // No requested scheme: a new credential takes the preferred parent
             // (the wallet's deterministic-P256 main key), and records which one
             // it got so every later assertion re-derives the same key.
-            val derived = credentialRepository.createDomainKeyPair(this@CreatePasskeyActivity, origin, userHandle)
+            // Akita: when the wallet's HD root is the parent, the key is derived exactly
+            // as the iOS provider derives it, so the same passkey can be re-derived on
+            // any Akita device.
+            val derived = credentialRepository.createDomainKeyPair(
+                this@CreatePasskeyActivity,
+                origin,
+                userHandle,
+                siteHandle = SiteCredentialDerivation.canonicalUserHandle(requestOptions.user.id),
+            )
             val keyPair: KeyPair = derived.keyPair
             PasskeyLog.d(TAG, "Derived from parent ${derived.parentKeyId} (${derived.derivationScheme})")
             PasskeyLog.d(TAG, "Generating credential ID")
