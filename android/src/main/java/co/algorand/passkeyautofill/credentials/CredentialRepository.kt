@@ -48,6 +48,7 @@ interface CredentialRepository {
     fun getGetPasskeyAction(context: Context): String?
     fun clearCredentials(context: Context)
     fun deleteCredential(context: Context, credentialId: String)
+    fun configureTransactionPreview(context: Context, credentialId: String, enabled: Boolean, apiBaseUrl: String, token: String)
     
     fun getBiometricCipherForEncryption(): Cipher
     fun getBiometricCipherForDecryption(iv: ByteArray): Cipher
@@ -131,6 +132,9 @@ class Repository() : CredentialRepository {
         metadata.put("userHandle", credential.userHandle)
         metadata.put("userId", credential.userId)
         metadata.put("count", credential.count)
+        metadata.put("showTransactionRequests", credential.showTransactionRequests)
+        credential.previewApiBaseUrl?.let { metadata.put("previewApiBaseUrl", it) }
+        credential.previewToken?.let { metadata.put("previewToken", it) }
         keyData.put("metadata", metadata)
 
         // 2. Encode matching react-native-keystore's encode()
@@ -172,7 +176,10 @@ class Repository() : CredentialRepository {
                         publicKey = AndroidBase64.encodeToString(jsonArrayToByteArray(json.getJSONArray("publicKey")), AndroidBase64.DEFAULT),
                         privateKey = if (json.has("privateKey")) AndroidBase64.encodeToString(jsonArrayToByteArray(json.getJSONArray("privateKey")), AndroidBase64.DEFAULT) else "",
                         count = metadata?.optInt("count") ?: json.optInt("count", 0),
-                        biometricIv = encJson?.optString("iv")
+                        biometricIv = encJson?.optString("iv"),
+                        showTransactionRequests = metadata?.optBoolean("showTransactionRequests", false) ?: false,
+                        previewApiBaseUrl = metadata?.optString("previewApiBaseUrl")?.takeIf { it.isNotEmpty() },
+                        previewToken = metadata?.optString("previewToken")?.takeIf { it.isNotEmpty() },
                     ))
                 }
             } catch (e: Exception) {
@@ -235,7 +242,10 @@ class Repository() : CredentialRepository {
                 publicKey = AndroidBase64.encodeToString(jsonArrayToByteArray(json.getJSONArray("publicKey")), AndroidBase64.DEFAULT),
                 privateKey = privateKey,
                 count = metadata?.optInt("count") ?: json.optInt("count", 0),
-                biometricIv = encJson?.optString("iv")
+                biometricIv = encJson?.optString("iv"),
+                showTransactionRequests = metadata?.optBoolean("showTransactionRequests", false) ?: false,
+                previewApiBaseUrl = metadata?.optString("previewApiBaseUrl")?.takeIf { it.isNotEmpty() },
+                previewToken = metadata?.optString("previewToken")?.takeIf { it.isNotEmpty() },
             )
         } catch (e: Exception) {
             null
@@ -585,6 +595,42 @@ class Repository() : CredentialRepository {
         } catch (e: Exception) {
             Log.e(CredentialRepository.TAG, "Error deleting credential", e)
         }
+    }
+
+    override fun configureTransactionPreview(
+        context: Context,
+        credentialId: String,
+        enabled: Boolean,
+        apiBaseUrl: String,
+        token: String,
+    ) {
+        val mmkv = getPasskeysMMKV(context)
+        val masterKey = getMasterKey(context) ?: throw IllegalStateException("Master key is unavailable")
+        for (key in mmkv.allKeys() ?: emptyArray()) {
+            val payload = mmkv.decodeString(key) ?: continue
+            val keyData = try { decodeKeyData(payload, masterKey) } catch (_: Exception) { continue }
+            val storedId = keyData.optString("id")
+            val normalizedStored = storedId.replace("+", "-").replace("/", "_").trimEnd('=')
+            val normalizedRequested = credentialId.replace("+", "-").replace("/", "_").trimEnd('=')
+            if (normalizedStored != normalizedRequested) continue
+            val metadata = keyData.optJSONObject("metadata") ?: JSONObject()
+            metadata.put("showTransactionRequests", enabled)
+            if (enabled) {
+                metadata.put("previewApiBaseUrl", apiBaseUrl)
+                metadata.put("previewToken", token)
+            } else {
+                metadata.remove("previewApiBaseUrl")
+                metadata.remove("previewToken")
+            }
+            keyData.put("metadata", metadata)
+            val encoded = AndroidBase64.encodeToString(
+                keyData.toString().toByteArray(Charsets.UTF_8),
+                AndroidBase64.URL_SAFE or AndroidBase64.NO_WRAP,
+            )
+            mmkv.encode(key, encryptData(masterKey, encoded))
+            return
+        }
+        throw IllegalArgumentException("Passkey credential was not found")
     }
 
     private fun credentialIdCandidates(id: String): Set<String> {

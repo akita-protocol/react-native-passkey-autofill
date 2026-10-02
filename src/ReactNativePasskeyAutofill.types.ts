@@ -18,4 +18,6 @@ export type PasskeyAutofillCredentialIdentity = {
   publicKeyBase64?: string;
   createdAt?: number;
   parentKeyId?: string;
+  showTransactionRequests?: boolean;
+  previewApiBaseUrl?: string;
 };

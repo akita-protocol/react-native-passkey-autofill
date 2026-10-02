@@ -13,6 +13,12 @@ declare class ReactNativePasskeyAutofillModule extends NativeModule<ReactNativeP
   configureIntentActions(getPasskeyAction: string, createPasskeyAction: string): Promise<void>;
   clearCredentials(): Promise<void>;
   deleteCredential(credentialId: string): Promise<void>;
+  configureCredentialTransactionPreview(
+    credentialId: string,
+    enabled: boolean,
+    apiBaseUrl: string,
+    token: string,
+  ): Promise<void>;
   getStoredCredentials(): Promise<PasskeyAutofillCredentialIdentity[]>;
   getDiagnostics(): Promise<string[]>;
   /**

@@ -95,6 +95,31 @@ class ReactNativePasskeyAutofillModule : Module() {
       credentialRepository.deleteCredential(context, credentialId)
     }
 
+    AsyncFunction("getStoredCredentials") {
+      val context = (appContext.reactContext ?: appContext.hostingRuntimeContext) as? Context
+        ?: return@AsyncFunction emptyList<Map<String, Any?>>()
+      credentialRepository.getAllCredentials(context).map { credential ->
+        mapOf(
+          "credentialId" to credential.credentialId,
+          "relyingPartyIdentifier" to credential.origin,
+          "userName" to credential.userId,
+          "userHandle" to credential.userHandle,
+          "publicKey" to credential.publicKey,
+          "showTransactionRequests" to credential.showTransactionRequests,
+          "previewApiBaseUrl" to credential.previewApiBaseUrl,
+        )
+      }
+    }
+
+    AsyncFunction("refreshCredentialIdentities") { Unit }
+
+    AsyncFunction("configureCredentialTransactionPreview") {
+      credentialId: String, enabled: Boolean, apiBaseUrl: String, token: String ->
+      val context = (appContext.reactContext ?: appContext.hostingRuntimeContext) as? Context
+        ?: return@AsyncFunction Unit
+      credentialRepository.configureTransactionPreview(context, credentialId, enabled, apiBaseUrl, token)
+    }
+
     AsyncFunction("configureIntentActions") { getPasskeyAction: String, createPasskeyAction: String ->
       val context = (appContext.reactContext ?: appContext.hostingRuntimeContext) as? Context
       if (context != null) {

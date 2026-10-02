@@ -4,6 +4,7 @@ const mockModule = {
   getHdRootKeyId: jest.fn(),
   configureIntentActions: jest.fn(),
   clearCredentials: jest.fn(),
+  configureCredentialTransactionPreview: jest.fn(),
   replaceCredentialIdentities: jest.fn(),
   refreshCredentialIdentities: jest.fn(),
   isProviderActive: jest.fn(),
@@ -27,5 +28,21 @@ describe("ReactNativePasskeyAutofill", () => {
     const mockModule = requireNativeModule("ReactNativePasskeyAutofill");
     await ReactNativePasskeyAutofill.setMasterKey("secret");
     expect(mockModule.setMasterKey).toHaveBeenCalledWith("secret");
+  });
+
+  it("should configure credential-scoped native transaction preview", async () => {
+    const mockModule = requireNativeModule("ReactNativePasskeyAutofill");
+    await ReactNativePasskeyAutofill.configureCredentialTransactionPreview(
+      "credential",
+      true,
+      "https://gateway.akita.community",
+      "token",
+    );
+    expect(mockModule.configureCredentialTransactionPreview).toHaveBeenCalledWith(
+      "credential",
+      true,
+      "https://gateway.akita.community",
+      "token",
+    );
   });
 });

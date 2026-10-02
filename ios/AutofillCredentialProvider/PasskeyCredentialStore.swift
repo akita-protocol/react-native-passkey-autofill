@@ -22,6 +22,35 @@ struct StoredPasskeyCredential: Codable {
   let publicKey: String?
   let createdAt: Double
   let parentKeyId: String?
+  let showTransactionRequests: Bool?
+  let previewApiBaseUrl: String?
+  let previewToken: String?
+
+  init(
+    credentialId: String,
+    relyingPartyIdentifier: String,
+    userName: String,
+    userHandle: String,
+    privateKey: String,
+    publicKey: String?,
+    createdAt: Double,
+    parentKeyId: String?,
+    showTransactionRequests: Bool? = nil,
+    previewApiBaseUrl: String? = nil,
+    previewToken: String? = nil
+  ) {
+    self.credentialId = credentialId
+    self.relyingPartyIdentifier = relyingPartyIdentifier
+    self.userName = userName
+    self.userHandle = userHandle
+    self.privateKey = privateKey
+    self.publicKey = publicKey
+    self.createdAt = createdAt
+    self.parentKeyId = parentKeyId
+    self.showTransactionRequests = showTransactionRequests
+    self.previewApiBaseUrl = previewApiBaseUrl
+    self.previewToken = previewToken
+  }
 }
 
 final class PasskeyCredentialStore {
@@ -96,6 +125,41 @@ final class PasskeyCredentialStore {
     #endif
   }
 
+  func configureTransactionPreview(
+    credentialId: String,
+    enabled: Bool,
+    apiBaseUrl: String,
+    token: String
+  ) throws {
+    guard let masterKey = masterKey(),
+          let appGroup = Bundle.main.object(forInfoDictionaryKey: Self.defaultSuiteNameKey) as? String
+    else {
+      throw PasskeyCredentialStoreError.appGroupUnavailable
+    }
+    let candidates = credentialIdCandidates(credentialId)
+    for candidate in candidates {
+      guard let payload = try? PasskeyKeystoreMMKV.string(forKey: candidate, appGroup: appGroup),
+            let keyData = try? decodeKeystorePayload(payload, masterKey: masterKey)
+      else { continue }
+      var updated = keyData
+      var metadata = keyData["metadata"] as? [String: Any] ?? [:]
+      metadata["showTransactionRequests"] = enabled
+      if enabled {
+        metadata["previewApiBaseUrl"] = apiBaseUrl
+        metadata["previewToken"] = token
+      } else {
+        metadata.removeValue(forKey: "previewApiBaseUrl")
+        metadata.removeValue(forKey: "previewToken")
+      }
+      updated["metadata"] = metadata
+      let encoded = try encodeKeyData(updated)
+      let encrypted = try encryptData(masterKey, encoded)
+      try PasskeyKeystoreMMKV.setString(encrypted, forKey: candidate, appGroup: appGroup)
+      return
+    }
+    throw PasskeyCredentialStoreError.credentialNotFound
+  }
+
   func removeCredential(id: String) throws {
     let candidateIds = credentialIdCandidates(id)
     markCredentialsDeleted(ids: candidateIds)
@@ -145,6 +209,9 @@ final class PasskeyCredentialStore {
       let origin = metadata?["origin"] as? String ?? keyData["origin"] as? String ?? ""
       let userHandle = metadata?["userHandle"] as? String ?? keyData["userHandle"] as? String ?? ""
       let parentKeyId = metadata?["parentKeyId"] as? String ?? keyData["parentKeyId"] as? String
+      let showTransactionRequests = metadata?["showTransactionRequests"] as? Bool
+      let previewApiBaseUrl = metadata?["previewApiBaseUrl"] as? String
+      let previewToken = metadata?["previewToken"] as? String
       guard !origin.isEmpty, !userHandle.isEmpty else {
         appendDiagnostic("skipping keystore credential missing metadata: \(id)")
         return nil
@@ -159,7 +226,10 @@ final class PasskeyCredentialStore {
         privateKey: privateKey.base64EncodedString(),
         publicKey: publicKey.base64EncodedString(),
         createdAt: metadata?["createdAt"] as? Double ?? Date().timeIntervalSince1970,
-        parentKeyId: parentKeyId
+        parentKeyId: parentKeyId,
+        showTransactionRequests: showTransactionRequests,
+        previewApiBaseUrl: previewApiBaseUrl,
+        previewToken: previewToken
       )
     }
   }
@@ -189,6 +259,15 @@ final class PasskeyCredentialStore {
     ]
     if let parentKeyId = credential.parentKeyId ?? hdRootKeyId() {
       metadata["parentKeyId"] = parentKeyId
+    }
+    if let showTransactionRequests = credential.showTransactionRequests {
+      metadata["showTransactionRequests"] = showTransactionRequests
+    }
+    if let previewApiBaseUrl = credential.previewApiBaseUrl {
+      metadata["previewApiBaseUrl"] = previewApiBaseUrl
+    }
+    if let previewToken = credential.previewToken {
+      metadata["previewToken"] = previewToken
     }
 
     let keyData: [String: Any] = [

@@ -8,5 +8,8 @@ data class Credential(
     val publicKey: String,
     val privateKey: String,
     val count: Int,
-    val biometricIv: String? = null
+    val biometricIv: String? = null,
+    val showTransactionRequests: Boolean = false,
+    val previewApiBaseUrl: String? = null,
+    val previewToken: String? = null,
 )

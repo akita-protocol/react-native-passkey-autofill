@@ -43,11 +43,12 @@ static constexpr auto PasskeyMMKVMultiProcess = MMKV_MULTI_PROCESS;
   }
 
 #ifdef MMKV_APPLE
-  return keystore->set([value UTF8String], key);
+  std::string cppValue([value UTF8String]);
+  return keystore->set(cppValue, key);
 #else
   std::string cppValue([value UTF8String]);
   std::string cppKey([key UTF8String]);
-  return keystore->set(cppValue, cppKey);
+  return keystore->set(cppValue, std::string_view(cppKey));
 #endif
 }
 
@@ -59,18 +60,15 @@ static constexpr auto PasskeyMMKVMultiProcess = MMKV_MULTI_PROCESS;
     return nil;
   }
 
-#ifdef MMKV_APPLE
-  std::string result = keystore->getString(key);
-  if (result.empty()) {
-    return nil;
-  }
-#else
   std::string result;
+#ifdef MMKV_APPLE
+  if (!keystore->getString(key, result)) {
+#else
   std::string cppKey([key UTF8String]);
-  if (!keystore->getString(cppKey, result)) {
+  if (!keystore->getString(std::string_view(cppKey), result)) {
+#endif
     return nil;
   }
-#endif
   return [NSString stringWithUTF8String:result.c_str()];
 }
 
@@ -83,20 +81,18 @@ static constexpr auto PasskeyMMKVMultiProcess = MMKV_MULTI_PROCESS;
 
 #ifdef MMKV_APPLE
   NSArray *keys = keystore->allKeysObjC();
-  NSMutableArray<NSString *> *result = [NSMutableArray arrayWithCapacity:keys.count];
-  for (id key in keys) {
-    if ([key isKindOfClass:[NSString class]]) {
-      [result addObject:(NSString *)key];
-    }
-  }
+  return keys == nil ? @[] : keys;
 #else
   std::vector<std::string> keys = keystore->allKeys();
   NSMutableArray<NSString *> *result = [NSMutableArray arrayWithCapacity:keys.size()];
-  for (const auto &key : keys) {
-    [result addObject:[NSString stringWithUTF8String:key.c_str()]];
+  for (const auto &cppKey : keys) {
+    NSString *keyString = [NSString stringWithUTF8String:cppKey.c_str()];
+    if (keyString != nil) {
+      [result addObject:keyString];
+    }
   }
-#endif
   return result;
+#endif
 }
 
 + (BOOL)removeValueForKey:(NSString *)key
@@ -111,7 +107,7 @@ static constexpr auto PasskeyMMKVMultiProcess = MMKV_MULTI_PROCESS;
   keystore->removeValueForKey(key);
 #else
   std::string cppKey([key UTF8String]);
-  keystore->removeValueForKey(cppKey);
+  keystore->removeValueForKey(std::string_view(cppKey));
 #endif
   return YES;
 }
