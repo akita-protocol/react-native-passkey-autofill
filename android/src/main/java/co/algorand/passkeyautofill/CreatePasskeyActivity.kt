@@ -372,7 +372,7 @@ class CreatePasskeyActivity : AppCompatActivity() {
                 this@CreatePasskeyActivity,
                 origin,
                 userHandle,
-                siteHandle = SiteCredentialDerivation.canonicalUserHandle(requestOptions.user.id),
+                siteHandle = SiteCredentialDerivation.handleForUserName(requestOptions.user.name),
             )
             val keyPair: KeyPair = derived.keyPair
             PasskeyLog.d(TAG, "Derived from parent ${derived.parentKeyId} (${derived.derivationScheme})")

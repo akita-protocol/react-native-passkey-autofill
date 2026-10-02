@@ -167,7 +167,7 @@ final class CredentialProviderViewController: ASCredentialProviderViewController
         privateKey = try SiteCredentialDerivation.privateKey(
           rootSecret: parent.bytes,
           rpId: identity.relyingPartyIdentifier,
-          handle: SiteCredentialDerivation.canonicalUserHandle(identity.userHandle)
+          handle: SiteCredentialDerivation.handle(forUserName: identity.userName)
         )
       } else {
         privateKey = try Self.domainSpecificKeyPair(

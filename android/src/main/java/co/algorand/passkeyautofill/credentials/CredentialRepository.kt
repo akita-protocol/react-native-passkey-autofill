@@ -643,7 +643,9 @@ class Repository() : CredentialRepository {
                 credential.origin,
                 credential.userHandle,
                 credential.derivationScheme ?: KeystoreRecords.SCHEME_BIP32_ED25519,
-                siteHandle = siteHandleOf(credential),
+                // Akita site passkeys always store their key; their derivation handle
+                // (user.name or, for older ones, user.id) is not re-guessed here.
+                siteHandle = null,
             ).keyPair
         } catch (e: Exception) {
             PasskeyLog.e(CredentialRepository.TAG, "Failed to re-derive key pair for credential", e)
@@ -694,15 +696,6 @@ class Repository() : CredentialRepository {
             parentKeyId = parent.keyId,
             derivationScheme = parent.scheme,
         )
-    }
-
-    /** Akita: the [SiteCredentialDerivation] handle a stored credential was created with. */
-    private fun siteHandleOf(credential: Credential): String? = try {
-        SiteCredentialDerivation.canonicalUserHandle(
-            AndroidBase64.decode(credential.userId, AndroidBase64.URL_SAFE or AndroidBase64.NO_WRAP or AndroidBase64.NO_PADDING)
-        )
-    } catch (e: IllegalArgumentException) {
-        null
     }
 
     override fun resolveParentSecret(context: Context, requestedScheme: String?): ParentSecretResult {
