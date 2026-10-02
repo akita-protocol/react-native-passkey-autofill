@@ -5,6 +5,7 @@ const mockModule = {
   configureIntentActions: jest.fn(),
   clearCredentials: jest.fn(),
   configureCredentialTransactionPreview: jest.fn(),
+  restoreDerivedCredentials: jest.fn(),
   replaceCredentialIdentities: jest.fn(),
   refreshCredentialIdentities: jest.fn(),
   isProviderActive: jest.fn(),
@@ -44,5 +45,22 @@ describe("ReactNativePasskeyAutofill", () => {
       "https://gateway.akita.community",
       "token",
     );
+  });
+
+  it("should pass synced passkeys to the native restore", async () => {
+    const mockModule = requireNativeModule("ReactNativePasskeyAutofill");
+    mockModule.restoreDerivedCredentials.mockResolvedValue({ restored: ["abc"], skipped: [] });
+    const credential = {
+      credentialId: "abc",
+      rpId: "example.com",
+      userIdBase64Url: "dXNlcg",
+      userName: "alice",
+      derivationHandle: "user",
+    };
+    await expect(ReactNativePasskeyAutofill.restoreDerivedCredentials([credential])).resolves.toEqual({
+      restored: ["abc"],
+      skipped: [],
+    });
+    expect(mockModule.restoreDerivedCredentials).toHaveBeenCalledWith([credential]);
   });
 });

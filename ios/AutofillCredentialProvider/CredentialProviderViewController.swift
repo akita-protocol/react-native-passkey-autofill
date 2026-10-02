@@ -151,11 +151,10 @@ final class CredentialProviderViewController: ASCredentialProviderViewController
 
       let parentKeyId = store.hdRootKeyId()
       let derivedParentSecret = try store.hdRootKeySecret()
-      let userHandle = identity.userHandleString
-      let privateKey = try Self.domainSpecificKeyPair(
-        derivedParentSecret: derivedParentSecret,
-        origin: identity.relyingPartyIdentifier,
-        userHandle: userHandle.lowercased()
+      let privateKey = try SiteCredentialDerivation.privateKey(
+        rootSecret: derivedParentSecret,
+        rpId: identity.relyingPartyIdentifier,
+        handle: SiteCredentialDerivation.canonicalUserHandle(identity.userHandle)
       )
       let publicKey = privateKey.publicKey.derRepresentation
       let credentialId = WebAuthn.credentialId(publicKey: publicKey)
@@ -533,31 +532,6 @@ final class CredentialProviderViewController: ASCredentialProviderViewController
       }
     }
   }
-
-  private static func domainSpecificKeyPair(
-    derivedParentSecret: Data,
-    origin: String,
-    userHandle: String,
-    counter: UInt32 = 0
-  ) throws -> P256.Signing.PrivateKey {
-    var input = Data()
-    input.append(derivedParentSecret)
-    input.append(contentsOf: origin.utf8)
-    input.append(contentsOf: userHandle.utf8)
-
-    for attempt in counter..<(counter + 16) {
-      var candidateInput = input
-      var bigEndianAttempt = attempt.bigEndian
-      withUnsafeBytes(of: &bigEndianAttempt) { candidateInput.append(contentsOf: $0) }
-
-      let digest = SHA512.hash(data: candidateInput)
-      if let key = try? P256.Signing.PrivateKey(rawRepresentation: Data(digest.prefix(32))) {
-        return key
-      }
-    }
-
-    throw PasskeyCredentialStoreError.invalidPrivateKey
-  }
 }
 
 private struct TransactionPreviewEnvelope: Decodable {
@@ -613,11 +587,5 @@ private extension CharacterSet {
 private extension String {
   var abbreviatedAddress: String {
     count > 16 ? "\(prefix(7))…\(suffix(5))" : self
-  }
-}
-
-private extension ASPasskeyCredentialIdentity {
-  var userHandleString: String {
-    String(data: userHandle, encoding: .utf8) ?? userHandle.base64URLEncodedString()
   }
 }
