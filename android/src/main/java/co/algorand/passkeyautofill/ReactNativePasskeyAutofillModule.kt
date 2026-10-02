@@ -2,6 +2,7 @@ package co.algorand.passkeyautofill
 
 import expo.modules.kotlin.modules.Module
 import expo.modules.kotlin.modules.ModuleDefinition
+import co.algorand.passkeyautofill.credentials.Credential
 import co.algorand.passkeyautofill.credentials.CredentialRepository
 import co.algorand.passkeyautofill.service.PasskeyAutofillCredentialProviderService
 import co.algorand.passkeyautofill.service.PasskeyAutofillCredentialProviderService.Companion.KEY_LAST_INVOKED_AT_MS
@@ -12,6 +13,7 @@ import android.content.Intent
 import android.net.Uri
 import android.provider.Settings
 import android.util.Log
+import android.util.Base64 as AndroidBase64
 import org.bouncycastle.jce.provider.BouncyCastleProvider
 import java.security.Security
 
@@ -107,8 +109,72 @@ class ReactNativePasskeyAutofillModule : Module() {
           "publicKey" to credential.publicKey,
           "showTransactionRequests" to credential.showTransactionRequests,
           "previewApiBaseUrl" to credential.previewApiBaseUrl,
+          "previewToken" to credential.previewToken,
+          // Platform-independent fields: on Android the legacy userName/userHandle keys
+          // carry user.id and user.name respectively, the reverse of iOS.
+          "rpId" to credential.origin,
+          "userIdBase64Url" to normalizeBase64Url(credential.userId),
+          "userDisplayName" to credential.userHandle,
         )
       }
+    }
+
+    // Adds synced site passkeys to this device. Each key is re-derived from the
+    // wallet's HD root and must reproduce its credential ID; credentials that
+    // already exist are left untouched.
+    AsyncFunction("restoreDerivedCredentials") { credentials: List<Map<String, Any?>> ->
+      val context = (appContext.reactContext ?: appContext.hostingRuntimeContext) as? Context
+        ?: throw IllegalStateException("No context available to restore passkeys.")
+      val existingIds = credentialRepository.getAllCredentials(context).map { it.credentialId }.toSet()
+      val restored = mutableListOf<String>()
+      val skipped = mutableListOf<Map<String, String>>()
+
+      for (credential in credentials) {
+        val reportedId = credential["credentialId"] as? String ?: ""
+        val expectedId = decodeBase64Url(reportedId)
+        val rpId = credential["rpId"] as? String
+        val userIdBase64Url = credential["userIdBase64Url"] as? String
+        val handle = credential["derivationHandle"] as? String
+        if (expectedId == null || rpId == null || userIdBase64Url == null || handle == null) {
+          skipped += mapOf("credentialId" to reportedId, "reason" to "invalid")
+          continue
+        }
+        val storedId = AndroidBase64.encodeToString(expectedId, AndroidBase64.NO_WRAP)
+        if (storedId in existingIds) {
+          skipped += mapOf("credentialId" to reportedId, "reason" to "exists")
+          continue
+        }
+
+        try {
+          val keyPair = credentialRepository.createDeterministicKeyPair(context, rpId, handle)
+          if (!credentialRepository.generateCredentialId(keyPair).contentEquals(expectedId)) {
+            skipped += mapOf("credentialId" to reportedId, "reason" to "mismatch")
+            continue
+          }
+          credentialRepository.saveCredential(
+            context,
+            Credential(
+              credentialId = storedId,
+              origin = rpId,
+              userHandle = credential["userName"] as? String ?: "",
+              userId = userIdBase64Url,
+              publicKey = AndroidBase64.encodeToString(keyPair.public.encoded, AndroidBase64.NO_WRAP),
+              privateKey = AndroidBase64.encodeToString(keyPair.private.encoded, AndroidBase64.NO_WRAP),
+              count = 0,
+              showTransactionRequests = credential["showTransactionRequests"] as? Boolean ?: false,
+              previewApiBaseUrl = credential["previewApiBaseUrl"] as? String,
+              previewToken = credential["previewToken"] as? String,
+            ),
+            null,
+          )
+          restored += reportedId
+        } catch (e: Exception) {
+          Log.e(CredentialRepository.TAG, "Failed to restore synced passkey", e)
+          skipped += mapOf("credentialId" to reportedId, "reason" to "error")
+        }
+      }
+
+      mapOf("restored" to restored, "skipped" to skipped)
     }
 
     AsyncFunction("refreshCredentialIdentities") { Unit }
@@ -158,6 +224,18 @@ class ReactNativePasskeyAutofillModule : Module() {
    *     The Credential Manager only routes requests to *enabled* providers,
    *     so a non-zero stamp is proof that we were selected at least once.
    */
+  private fun decodeBase64Url(value: String): ByteArray? = try {
+    AndroidBase64.decode(value, AndroidBase64.URL_SAFE or AndroidBase64.NO_WRAP or AndroidBase64.NO_PADDING)
+  } catch (e: IllegalArgumentException) {
+    null
+  }
+
+  // user.id is stored as it appeared in the request JSON; return it unpadded.
+  private fun normalizeBase64Url(value: String): String =
+    decodeBase64Url(value)?.let {
+      AndroidBase64.encodeToString(it, AndroidBase64.URL_SAFE or AndroidBase64.NO_WRAP or AndroidBase64.NO_PADDING)
+    } ?: value
+
   private fun isProviderEnabled(context: Context): Boolean {
     val expected = ComponentName(
       context.packageName,

@@ -3,6 +3,8 @@ import { NativeModule, requireNativeModule } from "expo";
 import {
   PasskeyAutofillCredentialIdentity,
   ReactNativePasskeyAutofillModuleEvents,
+  RestorableCredential,
+  RestoreCredentialsResult,
 } from "./ReactNativePasskeyAutofill.types";
 
 declare class ReactNativePasskeyAutofillModule extends NativeModule<ReactNativePasskeyAutofillModuleEvents> {
@@ -20,6 +22,12 @@ declare class ReactNativePasskeyAutofillModule extends NativeModule<ReactNativeP
     token: string,
   ): Promise<void>;
   getStoredCredentials(): Promise<PasskeyAutofillCredentialIdentity[]>;
+  /**
+   * Adds synced site passkeys to this device. Each key is re-derived from the
+   * wallet's HD root (see setHdRootSecret) and must reproduce its credential ID.
+   * Credentials that already exist on the device are skipped, not overwritten.
+   */
+  restoreDerivedCredentials(credentials: RestorableCredential[]): Promise<RestoreCredentialsResult>;
   getDiagnostics(): Promise<string[]>;
   /**
    * Replaces the iOS AutoFill passkey identity store with credentials
