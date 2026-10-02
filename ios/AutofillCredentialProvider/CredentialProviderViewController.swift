@@ -160,11 +160,22 @@ final class CredentialProviderViewController: ASCredentialProviderViewController
       let parent = try store.parentSecret()
       let parentKeyId = parent.keyId
       let userHandle = identity.userHandleString
-      let privateKey = try Self.domainSpecificKeyPair(
-        derivedParentSecret: parent.bytes,
-        origin: identity.relyingPartyIdentifier,
-        userHandle: userHandle.lowercased()
-      )
+      let privateKey: P256.Signing.PrivateKey
+      if parent.scheme == PasskeyKeystoreRecords.schemeAkitaHdRoot {
+        // Akita site passkeys: the shared derivation every Akita platform
+        // reproduces (test-vectors/site-credential-vectors.json).
+        privateKey = try SiteCredentialDerivation.privateKey(
+          rootSecret: parent.bytes,
+          rpId: identity.relyingPartyIdentifier,
+          handle: SiteCredentialDerivation.canonicalUserHandle(identity.userHandle)
+        )
+      } else {
+        privateKey = try Self.domainSpecificKeyPair(
+          derivedParentSecret: parent.bytes,
+          origin: identity.relyingPartyIdentifier,
+          userHandle: userHandle.lowercased()
+        )
+      }
       let publicKey = privateKey.publicKey.derRepresentation
       let credentialId = WebAuthn.credentialId(publicKey: publicKey)
       let storedCredential = StoredPasskeyCredential(

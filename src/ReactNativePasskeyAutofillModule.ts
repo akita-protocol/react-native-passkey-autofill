@@ -4,6 +4,8 @@ import { Platform } from "react-native";
 import {
   PasskeyAutofillCredentialIdentity,
   ReactNativePasskeyAutofillModuleEvents,
+  RestorableCredential,
+  RestoreCredentialsResult,
 } from "./ReactNativePasskeyAutofill.types";
 
 declare class ReactNativePasskeyAutofillModule extends NativeModule<ReactNativePasskeyAutofillModuleEvents> {
@@ -69,6 +71,13 @@ declare class ReactNativePasskeyAutofillModule extends NativeModule<ReactNativeP
    * and there is no separate identity store to query.
    */
   getStoredCredentials(): Promise<PasskeyAutofillCredentialIdentity[]>;
+  /**
+   * Akita: adds synced site passkeys to this device. Each key is re-derived from
+   * the wallet's HD root (see {@link setHdRootSecret}) and must reproduce its
+   * credential ID. Credentials that already exist on the device are skipped, not
+   * overwritten.
+   */
+  restoreDerivedCredentials(credentials: RestorableCredential[]): Promise<RestoreCredentialsResult>;
   /**
    * iOS: returns diagnostic strings from the AutoFill extension.
    * Android: no-op returning `[]`.

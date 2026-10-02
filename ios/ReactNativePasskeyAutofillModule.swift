@@ -220,9 +220,86 @@ public class ReactNativePasskeyAutofillModule: Module {
         if let previewApiBaseUrl = credential.previewApiBaseUrl {
           result["previewApiBaseUrl"] = previewApiBaseUrl
         }
+        if let previewToken = credential.previewToken {
+          result["previewToken"] = previewToken
+        }
+        // Platform-independent fields (Android's legacy keys differ in meaning).
+        result["rpId"] = credential.relyingPartyIdentifier
+        result["userIdBase64Url"] =
+          Data(base64Encoded: credential.userHandle)?.base64URLEncodedString() ?? credential.userHandle
+        result["userDisplayName"] = credential.userName
 
         return result
       }
+    }
+
+    // Adds synced site passkeys to this device. Each key is re-derived from the
+    // wallet's HD root and must reproduce its credential ID; existing credentials
+    // are left untouched.
+    AsyncFunction("restoreDerivedCredentials") { (credentials: [[String: Any]]) -> [String: Any] in
+      guard let store = PasskeyCredentialStore() else {
+        throw NSError(
+          domain: "ReactNativePasskeyAutofill",
+          code: 1,
+          userInfo: [NSLocalizedDescriptionKey: "App Group is not configured for passkey autofill."]
+        )
+      }
+      // Only the HD root shared through `setHdRootSecret` can reproduce a synced
+      // site passkey; without it (or without the master key) nothing is restored.
+      let parent = try store.parentSecret(scheme: PasskeyKeystoreRecords.schemeAkitaHdRoot)
+      var restored: [String] = []
+      var skipped: [[String: String]] = []
+
+      for credential in credentials {
+        let reportedId = credential["credentialId"] as? String ?? ""
+        guard let expectedId = Data(base64URLEncoded: reportedId),
+              let rpId = credential["rpId"] as? String,
+              let userIdBase64Url = credential["userIdBase64Url"] as? String,
+              let userId = Data(base64URLEncoded: userIdBase64Url),
+              let handle = credential["derivationHandle"] as? String
+        else {
+          skipped.append(["credentialId": reportedId, "reason": "invalid"])
+          continue
+        }
+
+        if store.credential(id: expectedId) != nil {
+          skipped.append(["credentialId": reportedId, "reason": "exists"])
+          continue
+        }
+
+        do {
+          let key = try SiteCredentialDerivation.privateKey(rootSecret: parent.bytes, rpId: rpId, handle: handle)
+          guard SiteCredentialDerivation.credentialId(publicKey: key.publicKey) == expectedId else {
+            skipped.append(["credentialId": reportedId, "reason": "mismatch"])
+            continue
+          }
+          let createdAtMillis = (credential["createdAt"] as? NSNumber)?.doubleValue
+          try store.save(StoredPasskeyCredential(
+            credentialId: expectedId.base64EncodedString(),
+            relyingPartyIdentifier: rpId,
+            userName: credential["userName"] as? String ?? "",
+            userHandle: userId.base64EncodedString(),
+            privateKey: key.rawRepresentation.base64EncodedString(),
+            publicKey: key.publicKey.derRepresentation.base64EncodedString(),
+            createdAt: createdAtMillis.map { $0 / 1000 } ?? Date().timeIntervalSince1970,
+            lastUsedAt: nil,
+            parentKeyId: parent.keyId,
+            derivationScheme: parent.scheme,
+            showTransactionRequests: credential["showTransactionRequests"] as? Bool,
+            previewApiBaseUrl: credential["previewApiBaseUrl"] as? String,
+            previewToken: credential["previewToken"] as? String
+          ))
+          restored.append(reportedId)
+        } catch {
+          skipped.append(["credentialId": reportedId, "reason": "error"])
+        }
+      }
+
+      if !restored.isEmpty {
+        // AutoFill may be disabled in Settings; the credentials are stored either way.
+        try? await store.replaceIdentityStore()
+      }
+      return ["restored": restored, "skipped": skipped]
     }
 
     AsyncFunction("getDiagnostics") { () -> [String] in

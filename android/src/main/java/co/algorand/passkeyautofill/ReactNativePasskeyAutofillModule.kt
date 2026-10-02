@@ -3,7 +3,9 @@ package co.algorand.passkeyautofill
 import expo.modules.kotlin.exception.CodedException
 import expo.modules.kotlin.modules.Module
 import expo.modules.kotlin.modules.ModuleDefinition
+import co.algorand.passkeyautofill.credentials.Credential
 import co.algorand.passkeyautofill.credentials.CredentialRepository
+import co.algorand.passkeyautofill.credentials.KeystoreRecords
 import co.algorand.passkeyautofill.service.PasskeyAutofillCredentialProviderService
 import android.content.ComponentName
 import android.content.Context
@@ -11,6 +13,7 @@ import android.content.Intent
 import android.net.Uri
 import android.os.Build
 import android.provider.Settings
+import android.util.Base64 as AndroidBase64
 import co.algorand.passkeyautofill.utils.PasskeyLog
 import org.bouncycastle.jce.provider.BouncyCastleProvider
 import java.security.Security
@@ -197,8 +200,82 @@ class ReactNativePasskeyAutofillModule : Module() {
           "derivationScheme" to credential.derivationScheme,
           "showTransactionRequests" to credential.showTransactionRequests,
           "previewApiBaseUrl" to credential.previewApiBaseUrl,
+          "previewToken" to credential.previewToken,
+          // Platform-independent fields: Android stores user.name as `userHandle`
+          // and user.id as `userId`, so the legacy keys above differ from iOS.
+          "rpId" to credential.origin,
+          "userIdBase64Url" to normalizeBase64Url(credential.userId),
+          "userDisplayName" to credential.userHandle,
         )
       }
+    }
+
+    // Akita: adds synced site passkeys to this device. Each key is re-derived from
+    // the wallet's HD root (setHdRootSecret) and must reproduce its credential ID;
+    // credentials that already exist are left untouched.
+    AsyncFunction("restoreDerivedCredentials") { credentials: List<Map<String, Any?>> ->
+      val context = (appContext.reactContext ?: appContext.hostingRuntimeContext) as? Context
+        ?: throw IllegalStateException("No context available to restore passkeys.")
+      val existingIds = credentialRepository.getAllCredentials(context).map { it.credentialId }.toSet()
+      val restored = mutableListOf<String>()
+      val skipped = mutableListOf<Map<String, String>>()
+
+      for (credential in credentials) {
+        val reportedId = credential["credentialId"] as? String ?: ""
+        val expectedId = decodeBase64Url(reportedId)
+        val rpId = credential["rpId"] as? String
+        val userIdBase64Url = credential["userIdBase64Url"] as? String
+        val handle = credential["derivationHandle"] as? String
+        if (expectedId == null || rpId == null || userIdBase64Url == null || handle == null) {
+          skipped += mapOf("credentialId" to reportedId, "reason" to "invalid")
+          continue
+        }
+        val storedId = AndroidBase64.encodeToString(expectedId, AndroidBase64.NO_WRAP)
+        if (storedId in existingIds) {
+          skipped += mapOf("credentialId" to reportedId, "reason" to "exists")
+          continue
+        }
+
+        try {
+          // Pinned to the HD root: fails (and the record is skipped) when the
+          // wallet has not shared it, rather than deriving from another parent.
+          val derived = credentialRepository.createDomainKeyPair(
+            context,
+            rpId,
+            handle,
+            requestedScheme = KeystoreRecords.SCHEME_AKITA_HD_ROOT,
+            siteHandle = handle,
+          )
+          if (!credentialRepository.generateCredentialId(derived.keyPair).contentEquals(expectedId)) {
+            skipped += mapOf("credentialId" to reportedId, "reason" to "mismatch")
+            continue
+          }
+          credentialRepository.saveCredential(
+            context,
+            Credential(
+              credentialId = storedId,
+              origin = rpId,
+              userHandle = credential["userName"] as? String ?: "",
+              userId = userIdBase64Url,
+              publicKey = AndroidBase64.encodeToString(derived.keyPair.public.encoded, AndroidBase64.NO_WRAP),
+              privateKey = AndroidBase64.encodeToString(derived.keyPair.private.encoded, AndroidBase64.NO_WRAP),
+              count = 0,
+              parentKeyId = derived.parentKeyId,
+              derivationScheme = derived.derivationScheme,
+              showTransactionRequests = credential["showTransactionRequests"] as? Boolean ?: false,
+              previewApiBaseUrl = credential["previewApiBaseUrl"] as? String,
+              previewToken = credential["previewToken"] as? String,
+            ),
+            null,
+          )
+          restored += reportedId
+        } catch (e: Exception) {
+          PasskeyLog.e(CredentialRepository.TAG, "Failed to restore a synced passkey", e)
+          skipped += mapOf("credentialId" to reportedId, "reason" to "error")
+        }
+      }
+
+      mapOf("restored" to restored, "skipped" to skipped)
     }
 
     // The iOS AutoFill identity store (ASCredentialIdentityStore) has no
@@ -223,6 +300,18 @@ class ReactNativePasskeyAutofillModule : Module() {
    * typically throw `SecurityException` for non-system apps on Android 12+,
    * in which case we conservatively return `false` rather than guess.
    */
+  private fun decodeBase64Url(value: String): ByteArray? = try {
+    AndroidBase64.decode(value, AndroidBase64.URL_SAFE or AndroidBase64.NO_WRAP or AndroidBase64.NO_PADDING)
+  } catch (e: IllegalArgumentException) {
+    null
+  }
+
+  // user.id is stored as it appeared in the request JSON; return it unpadded.
+  private fun normalizeBase64Url(value: String): String =
+    decodeBase64Url(value)?.let {
+      AndroidBase64.encodeToString(it, AndroidBase64.URL_SAFE or AndroidBase64.NO_WRAP or AndroidBase64.NO_PADDING)
+    } ?: value
+
   private fun isProviderEnabled(context: Context): Boolean {
     val component = ComponentName(
       context.packageName,

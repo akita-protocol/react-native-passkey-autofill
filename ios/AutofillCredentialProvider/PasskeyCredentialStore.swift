@@ -21,6 +21,43 @@ enum PasskeyCredentialStoreError: Error {
   case signingFailed
 }
 
+/// Derives Akita site passkeys from the wallet's HD root. Used by the AutoFill
+/// extension when a site registers a passkey and by the app module when restoring
+/// synced passkeys. Android (SiteCredentialDerivation.kt) and the desktop app
+/// implement the same rule; test-vectors/site-credential-vectors.json pins it.
+///
+///   handle = lowercase(utf8(user.id) ?: base64url(user.id))
+///   d = SHA-512(root ‖ rpId ‖ handle ‖ BE32(attempt))[0..32], first valid attempt
+enum SiteCredentialDerivation {
+  static func canonicalUserHandle(_ userId: Data) -> String {
+    (String(data: userId, encoding: .utf8) ?? userId.base64URLEncodedString()).lowercased()
+  }
+
+  static func privateKey(rootSecret: Data, rpId: String, handle: String) throws -> P256.Signing.PrivateKey {
+    var input = Data()
+    input.append(rootSecret)
+    input.append(contentsOf: rpId.utf8)
+    input.append(contentsOf: handle.utf8)
+
+    for attempt in UInt32(0)..<16 {
+      var candidateInput = input
+      var bigEndianAttempt = attempt.bigEndian
+      withUnsafeBytes(of: &bigEndianAttempt) { candidateInput.append(contentsOf: $0) }
+
+      let digest = SHA512.hash(data: candidateInput)
+      if let key = try? P256.Signing.PrivateKey(rawRepresentation: Data(digest.prefix(32))) {
+        return key
+      }
+    }
+
+    throw PasskeyCredentialStoreError.invalidPrivateKey
+  }
+
+  static func credentialId(publicKey: P256.Signing.PublicKey) -> Data {
+    Data(SHA256.hash(data: publicKey.derRepresentation))
+  }
+}
+
 /// The parent secret a credential's deterministic material hangs off, with the
 /// record it came from and the scheme it roots.
 struct PasskeyParentSecret {

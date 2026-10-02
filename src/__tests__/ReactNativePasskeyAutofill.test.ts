@@ -7,6 +7,7 @@ const mockModule: Record<string, jest.Mock> = {
   configureIntentActions: jest.fn(),
   clearCredentials: jest.fn(),
   configureCredentialTransactionPreview: jest.fn(),
+  restoreDerivedCredentials: jest.fn(),
   // Intentionally omit `replaceCredentialIdentities`, `refreshCredentialIdentities`,
   // `getStoredCredentials`, and `getDiagnostics` to mirror the real Android
   // native module surface and exercise the JS no-op fallbacks.
@@ -78,6 +79,23 @@ describe("ReactNativePasskeyAutofill", () => {
       "https://gateway.akita.community",
       "token",
     );
+  });
+
+  it("should pass synced passkeys to the native restore", async () => {
+    const mockModule = requireNativeModule("ReactNativePasskeyAutofill");
+    mockModule.restoreDerivedCredentials.mockResolvedValue({ restored: ["abc"], skipped: [] });
+    const credential = {
+      credentialId: "abc",
+      rpId: "example.com",
+      userIdBase64Url: "dXNlcg",
+      userName: "alice",
+      derivationHandle: "user",
+    };
+    await expect(ReactNativePasskeyAutofill.restoreDerivedCredentials([credential])).resolves.toEqual({
+      restored: ["abc"],
+      skipped: [],
+    });
+    expect(mockModule.restoreDerivedCredentials).toHaveBeenCalledWith([credential]);
   });
 
   it("provides a no-op fallback on Android for iOS-only methods", async () => {
