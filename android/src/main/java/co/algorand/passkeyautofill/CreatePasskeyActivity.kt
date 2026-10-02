@@ -342,9 +342,9 @@ class CreatePasskeyActivity : AppCompatActivity() {
             }
 
             Log.d(TAG, "Creating deterministic key pair")
-            // Derive from the site's user.id exactly as the iOS provider does, so the same
-            // passkey can be re-derived on any Akita device. (user.name is display-only.)
-            val derivationHandle = SiteCredentialDerivation.canonicalUserHandle(requestOptions.user.id)
+            // Derive from the site's user.name exactly as the iOS provider does, so the
+            // same passkey can be re-derived on any Akita device.
+            val derivationHandle = SiteCredentialDerivation.handleForUserName(requestOptions.user.name)
             val keyPair: KeyPair = credentialRepository.createDeterministicKeyPair(this@CreatePasskeyActivity, origin, derivationHandle)
             Log.d(TAG, "Generating credential ID")
             val credentialId = credentialRepository.generateCredentialId(keyPair)
