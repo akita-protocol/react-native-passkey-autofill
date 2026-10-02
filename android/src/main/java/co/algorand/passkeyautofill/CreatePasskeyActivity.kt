@@ -24,6 +24,7 @@ import androidx.credentials.webauthn.FidoPublicKeyCredential
 import androidx.credentials.webauthn.PublicKeyCredentialCreationOptions
 import co.algorand.passkeyautofill.credentials.CredentialRepository
 import co.algorand.passkeyautofill.credentials.Credential
+import co.algorand.passkeyautofill.credentials.SiteCredentialDerivation
 import co.algorand.passkeyautofill.utils.PasskeyUtils
 import java.security.KeyPair
 import android.util.Base64 as AndroidBase64
@@ -341,7 +342,10 @@ class CreatePasskeyActivity : AppCompatActivity() {
             }
 
             Log.d(TAG, "Creating deterministic key pair")
-            val keyPair: KeyPair = credentialRepository.createDeterministicKeyPair(this@CreatePasskeyActivity, origin, userHandle)
+            // Derive from the site's user.id exactly as the iOS provider does, so the same
+            // passkey can be re-derived on any Akita device. (user.name is display-only.)
+            val derivationHandle = SiteCredentialDerivation.canonicalUserHandle(requestOptions.user.id)
+            val keyPair: KeyPair = credentialRepository.createDeterministicKeyPair(this@CreatePasskeyActivity, origin, derivationHandle)
             Log.d(TAG, "Generating credential ID")
             val credentialId = credentialRepository.generateCredentialId(keyPair)
             val credentialIdBase64 = AndroidBase64.encodeToString(credentialId, AndroidBase64.NO_WRAP)

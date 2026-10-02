@@ -29,6 +29,7 @@ interface CredentialRepository {
     fun saveCredential(context: Context, credential: Credential, biometricCipher: Cipher? = null)
     fun generateCredentialId(keyPair: KeyPair): ByteArray
     fun getKeyPair(context: Context, credentialId: ByteArray, biometricCipher: Cipher? = null): KeyPair?
+    /** [userHandle] must be SiteCredentialDerivation.canonicalUserHandle(user.id) so keys match iOS. */
     fun createDeterministicKeyPair(context: Context, origin: String, userHandle: String, biometricCipher: Cipher? = null): KeyPair
     fun getOrigin(info: CallingAppInfo): String
     fun appInfoToOrigin(info: CallingAppInfo): String
@@ -329,7 +330,7 @@ class Repository() : CredentialRepository {
         val mmkvAutofill = getAutofillMMKV(context)
         val directSecret = getHdRootSecret(context)
         if (directSecret != null) {
-            return dP256.genDomainSpecificKeypair(directSecret, origin, userHandle.lowercase())
+            return SiteCredentialDerivation.deriveKeyPair(directSecret, origin, userHandle)
         }
 
         val hdRootKeyId = mmkvAutofill.decodeString(CredentialRepository.HD_ROOT_KEY_ID_KEY) ?: throw IllegalStateException("HD Root Key ID not found. Ensure you have called setHdRootKeyId(id) or setHdRootSecret(secret) from JavaScript.")
@@ -369,7 +370,7 @@ class Repository() : CredentialRepository {
             }
         }
 
-        return dP256.genDomainSpecificKeypair(derivedParentSecret, origin, userHandle.lowercase())
+        return SiteCredentialDerivation.deriveKeyPair(derivedParentSecret, origin, userHandle)
     }
 
     private fun encryptData(key: ByteArray, data: String): String {
