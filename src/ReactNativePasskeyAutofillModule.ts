@@ -51,6 +51,18 @@ declare class ReactNativePasskeyAutofillModule extends NativeModule<ReactNativeP
    */
   deleteCredential(credentialId: string): Promise<void>;
   /**
+   * Akita: requires (or stops requiring) a native transaction preview before
+   * `credentialId` signs an assertion. When enabled, the provider fetches the
+   * pending preview from `apiBaseUrl` with `token` as a bearer token, checks it
+   * matches the request's client data, and asks the user to approve it.
+   */
+  configureCredentialTransactionPreview(
+    credentialId: string,
+    enabled: boolean,
+    apiBaseUrl: string,
+    token: string,
+  ): Promise<void>;
+  /**
    * iOS: returns the identities currently published to the AutoFill
    * `ASCredentialIdentityStore`. Android: no-op returning `[]` because the
    * native Credential Provider service reads credentials directly from MMKV

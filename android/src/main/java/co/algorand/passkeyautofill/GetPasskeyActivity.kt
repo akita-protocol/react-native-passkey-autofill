@@ -2,6 +2,7 @@ package co.algorand.passkeyautofill
 
 import android.annotation.SuppressLint
 import android.app.Activity
+import android.app.AlertDialog
 import android.content.Intent
 import android.os.Build
 import android.os.Bundle
@@ -34,6 +35,8 @@ import co.algorand.passkeyautofill.utils.PasskeyUtils
 import co.algorand.passkeyautofill.utils.PrivilegedBrowserAllowlist
 import java.security.KeyPair
 import java.security.MessageDigest
+import java.net.HttpURLConnection
+import java.net.URL
 import android.util.Base64 as AndroidBase64
 import androidx.biometric.BiometricManager
 import androidx.biometric.BiometricPrompt
@@ -42,6 +45,8 @@ import androidx.lifecycle.lifecycleScope
 import kotlin.coroutines.resume
 import kotlin.coroutines.suspendCoroutine
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import org.json.JSONObject
 
 @RequiresApi(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
@@ -67,6 +72,8 @@ class GetPasskeyActivity : AppCompatActivity() {
     private var systemVerified: Boolean = false
     private var systemUnlockedCipher: javax.crypto.Cipher? = null
     private var isHandling: Boolean = false
+    private var isLoadingTransactionPreview: Boolean = false
+    private var hasApprovedTransactionPreview: Boolean = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -143,12 +150,172 @@ class GetPasskeyActivity : AppCompatActivity() {
         // If the system already showed a biometric prompt (Single Tap), proceed automatically
         if (biometricPromptResult != null) {
             PasskeyLog.d(TAG, "System already showed biometric prompt (Single Tap), proceeding automatically")
-            handleAssertion()
+            beginAssertionFlow()
             return
         }
 
         // Auto-trigger assertion flow
-        handleAssertion()
+        beginAssertionFlow()
+    }
+
+    /**
+     * Akita: a credential configured for transaction previews shows the pending
+     * transaction group, fetched from the Akita API and bound to this request's
+     * client data, and waits for approval before the assertion can run.
+     */
+    private fun beginAssertionFlow() {
+        if (isHandling || isLoadingTransactionPreview) return
+        lifecycleScope.launch {
+            try {
+                val credential = credentialIdEnc?.let {
+                    credentialRepository.getCredentialMetadata(
+                        this@GetPasskeyActivity,
+                        AndroidBase64.decode(it, AndroidBase64.DEFAULT),
+                    )
+                }
+                if (credential?.showTransactionRequests == true && !hasApprovedTransactionPreview) {
+                    isLoadingTransactionPreview = true
+                    setupPreviewLoadingUI()
+                    val preview = try {
+                        withContext(Dispatchers.IO) { fetchAndValidateTransactionPreview(credential) }
+                    } finally {
+                        isLoadingTransactionPreview = false
+                    }
+                    if (!confirmTransactionPreview(preview)) {
+                        setResult(RESULT_CANCELED)
+                        finish()
+                        return@launch
+                    }
+                    hasApprovedTransactionPreview = true
+                }
+                handleAssertion()
+            } catch (error: Exception) {
+                PasskeyLog.e(TAG, "Required transaction preview failed", error)
+                showPreviewFailure(error.message ?: "The required transaction preview could not be verified.")
+            }
+        }
+    }
+
+    private fun fetchAndValidateTransactionPreview(credential: Credential): TransactionPreview {
+        val apiBaseUrl = credential.previewApiBaseUrl
+            ?: throw IllegalStateException("Transaction preview is required but is not configured.")
+        val token = credential.previewToken
+            ?: throw IllegalStateException("Transaction preview is required but is not configured.")
+        val base = URL(apiBaseUrl)
+        if (base.protocol.lowercase() != "https") {
+            throw IllegalStateException("Transaction preview endpoint must use HTTPS.")
+        }
+        val credentialIdBytes = AndroidBase64.decode(credential.credentialId, AndroidBase64.DEFAULT)
+        val credentialId = AndroidBase64.encodeToString(
+            credentialIdBytes,
+            AndroidBase64.URL_SAFE or AndroidBase64.NO_WRAP or AndroidBase64.NO_PADDING
+        )
+        val endpoint = URL(base, "/akita/passkey-previews/$credentialId")
+        val connection = endpoint.openConnection() as HttpURLConnection
+        try {
+            connection.requestMethod = "GET"
+            connection.connectTimeout = 10_000
+            connection.readTimeout = 15_000
+            connection.setRequestProperty("Authorization", "Bearer $token")
+            connection.setRequestProperty("Accept", "application/json")
+            if (connection.responseCode !in 200..299) {
+                throw IllegalStateException("No transaction preview is available.")
+            }
+            val response = connection.inputStream.bufferedReader().use { it.readText() }
+            val data = JSONObject(response).getJSONObject("data")
+            val preview = TransactionPreview.fromJson(data)
+            validateTransactionPreview(preview, credentialId)
+            return preview
+        } finally {
+            connection.disconnect()
+        }
+    }
+
+    private fun validateTransactionPreview(preview: TransactionPreview, credentialId: String) {
+        if (preview.credentialId != credentialId ||
+            preview.expiresAt < System.currentTimeMillis() / 1000 ||
+            preview.transactions.isEmpty() || preview.transactions.size > 16
+        ) {
+            throw IllegalStateException("The transaction preview is invalid or expired.")
+        }
+
+        val req = request ?: throw IllegalStateException("No passkey request is available.")
+        val rawRequestJson = bundleRequestJson ?: run {
+            val option = req.credentialOptions.firstOrNull { it is GetPublicKeyCredentialOption }
+                as? GetPublicKeyCredentialOption
+                ?: throw IllegalStateException("No passkey request is available.")
+            option.requestJson
+        }
+        val requestJson = JSONObject(rawRequestJson)
+        val publicKey = if (requestJson.has("publicKey")) requestJson.getJSONObject("publicKey") else requestJson
+        if (publicKey.optString("challenge") != preview.challenge) {
+            throw IllegalStateException("The preview does not match this transaction request.")
+        }
+        // Only an allow-listed privileged browser's clientDataHash is ever signed
+        // (see handleAssertion), so only that hash can bind a preview to a request.
+        if (privilegedOrigin == null) {
+            throw IllegalStateException("The browser did not provide a verifiable passkey request.")
+        }
+        val systemClientDataHash = req.credentialOptions
+            .filterIsInstance<GetPublicKeyCredentialOption>()
+            .firstOrNull { option ->
+                option.requestJson == rawRequestJson || try {
+                    JSONObject(option.requestJson).toString() == JSONObject(rawRequestJson).toString()
+                } catch (_: Exception) {
+                    false
+                }
+            }
+            ?.requestData
+            ?.getByteArray("androidx.credentials.BUNDLE_KEY_CLIENT_DATA_HASH")
+            ?: throw IllegalStateException("The browser did not provide a verifiable passkey request.")
+        val escapedChallenge = JSONObject.quote(preview.challenge)
+        val escapedOrigin = JSONObject.quote(preview.origin)
+        val candidates = listOf(
+            "{\"type\":\"webauthn.get\",\"challenge\":$escapedChallenge,\"origin\":$escapedOrigin,\"crossOrigin\":false}",
+            "{\"type\":\"webauthn.get\",\"challenge\":$escapedChallenge,\"origin\":$escapedOrigin}"
+        )
+        if (candidates.none {
+                MessageDigest.getInstance("SHA-256").digest(it.toByteArray(Charsets.UTF_8))
+                    .contentEquals(systemClientDataHash)
+            }) {
+            throw IllegalStateException("The preview does not match this passkey request.")
+        }
+    }
+
+    private suspend fun confirmTransactionPreview(preview: TransactionPreview): Boolean =
+        suspendCoroutine { continuation ->
+            val lines = preview.transactions.mapIndexed { index, transaction ->
+                "${index + 1}. ${transaction.displayText()}"
+            }.joinToString("\n")
+            AlertDialog.Builder(this)
+                .setTitle("Approve transaction group?")
+                .setMessage(lines)
+                .setNegativeButton("Cancel") { _, _ -> continuation.resume(false) }
+                .setPositiveButton("Continue") { _, _ -> continuation.resume(true) }
+                .setOnCancelListener { continuation.resume(false) }
+                .show()
+        }
+
+    private fun setupPreviewLoadingUI() {
+        val label = TextView(this).apply {
+            text = "Checking transaction group…"
+            textSize = 17f
+            gravity = Gravity.CENTER
+            setPadding(32, 32, 32, 32)
+        }
+        setContentView(label)
+    }
+
+    private fun showPreviewFailure(message: String) {
+        AlertDialog.Builder(this)
+            .setTitle("Transaction approval unavailable")
+            .setMessage(message)
+            .setCancelable(false)
+            .setNegativeButton("Cancel") { _, _ ->
+                setResult(RESULT_CANCELED)
+                finish()
+            }
+            .show()
     }
 
     private fun setupUI() {
@@ -247,7 +414,7 @@ class GetPasskeyActivity : AppCompatActivity() {
             // Stable accessibility id for E2E tests (`~get-passkey-confirm`).
             contentDescription = "get-passkey-confirm"
             setOnClickListener {
-                handleAssertion()
+                beginAssertionFlow()
             }
             layoutParams = LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
@@ -349,7 +516,7 @@ class GetPasskeyActivity : AppCompatActivity() {
                 text = "Try Again"
                 contentDescription = "get-passkey-retry"
                 setOnClickListener {
-                    handleAssertion()
+                    beginAssertionFlow()
                 }
                 layoutParams = LinearLayout.LayoutParams(
                     LinearLayout.LayoutParams.MATCH_PARENT,
@@ -749,5 +916,72 @@ class GetPasskeyActivity : AppCompatActivity() {
                 biometricPrompt.authenticate(promptInfo)
             }
         }
+    }
+}
+
+private data class TransactionPreview(
+    val credentialId: String,
+    val challenge: String,
+    val origin: String,
+    val expiresAt: Long,
+    val transactions: List<TransactionPreviewTransaction>
+) {
+    companion object {
+        fun fromJson(json: JSONObject): TransactionPreview {
+            val encodedTransactions = json.getJSONArray("transactions")
+            val transactions = (0 until encodedTransactions.length()).map { index ->
+                val transaction = encodedTransactions.getJSONObject(index)
+                TransactionPreviewTransaction(
+                    type = transaction.getString("type"),
+                    sender = transaction.getString("sender"),
+                    receiver = transaction.optString("receiver").takeIf { it.isNotEmpty() },
+                    amount = transaction.optLong("amount").takeIf { it > 0 },
+                    assetId = transaction.optLong("assetId").takeIf { it > 0 },
+                    appId = transaction.optLong("appId").takeIf { it > 0 },
+                    method = transaction.optString("method").takeIf { it.isNotEmpty() },
+                    fee = transaction.getLong("fee")
+                )
+            }
+            return TransactionPreview(
+                credentialId = json.getString("credentialId"),
+                challenge = json.getString("challenge"),
+                origin = json.getString("origin"),
+                expiresAt = json.getLong("expiresAt"),
+                transactions = transactions
+            )
+        }
+    }
+}
+
+private data class TransactionPreviewTransaction(
+    val type: String,
+    val sender: String,
+    val receiver: String?,
+    val amount: Long?,
+    val assetId: Long?,
+    val appId: Long?,
+    val method: String?,
+    val fee: Long
+) {
+    fun displayText(): String {
+        val label = when (type) {
+            "pay" -> "Payment"
+            "axfer" -> "Asset transfer"
+            "appl" -> "Application call"
+            else -> type
+        }
+        val details = mutableListOf<String>()
+        val abbreviatedSender = if (sender.length > 16) "${sender.take(7)}…${sender.takeLast(5)}" else sender
+        details.add("from $abbreviatedSender")
+        receiver?.let {
+            val abbreviated = if (it.length > 16) "${it.take(7)}…${it.takeLast(5)}" else it
+            details.add("to $abbreviated")
+        }
+        amount?.let { details.add(it.toString()) }
+        assetId?.let { details.add("asset $it") }
+        appId?.let { details.add("app $it") }
+        method?.let { details.add("method $it") }
+        details.add("fee $fee µALGO")
+        return "$label · ${details.joinToString(" · ")}"
     }
 }

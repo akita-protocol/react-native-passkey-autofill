@@ -30,6 +30,10 @@ export type PasskeyAutofillCredentialIdentity = {
    * every relying party is bound to.
    */
   derivationScheme?: string;
+  /** Akita: whether assertions must show a native transaction preview first. */
+  showTransactionRequests?: boolean;
+  /** Akita: the HTTPS origin the transaction preview is fetched from. */
+  previewApiBaseUrl?: string;
 };
 
 /**

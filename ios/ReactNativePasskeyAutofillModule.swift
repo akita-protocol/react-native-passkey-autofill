@@ -97,6 +97,24 @@ public class ReactNativePasskeyAutofillModule: Module {
       try await store.replaceIdentityStore()
     }
 
+    // Akita: credential-scoped native transaction preview.
+    AsyncFunction("configureCredentialTransactionPreview") {
+      (credentialId: String, enabled: Bool, apiBaseUrl: String, token: String) in
+      guard let store = PasskeyCredentialStore() else {
+        throw NSError(
+          domain: "ReactNativePasskeyAutofill",
+          code: 2,
+          userInfo: [NSLocalizedDescriptionKey: "App Group is not configured for passkey autofill."]
+        )
+      }
+      try store.configureTransactionPreview(
+        credentialId: credentialId,
+        enabled: enabled,
+        apiBaseUrl: apiBaseUrl,
+        token: token
+      )
+    }
+
     AsyncFunction("configureIntentActions") { (getPasskeyAction: String, createPasskeyAction: String) in
       guard let store = PasskeyCredentialStore() else {
         return
@@ -197,6 +215,10 @@ public class ReactNativePasskeyAutofillModule: Module {
         }
         if let derivationScheme = credential.derivationScheme {
           result["derivationScheme"] = derivationScheme
+        }
+        result["showTransactionRequests"] = credential.showTransactionRequests ?? false
+        if let previewApiBaseUrl = credential.previewApiBaseUrl {
+          result["previewApiBaseUrl"] = previewApiBaseUrl
         }
 
         return result

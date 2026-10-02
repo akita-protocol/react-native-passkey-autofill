@@ -139,6 +139,13 @@ class ReactNativePasskeyAutofillModule : Module() {
       credentialRepository.deleteCredential(context, credentialId)
     }
 
+    AsyncFunction("configureCredentialTransactionPreview") {
+      credentialId: String, enabled: Boolean, apiBaseUrl: String, token: String ->
+      val context = (appContext.reactContext ?: appContext.hostingRuntimeContext) as? Context
+        ?: throw IllegalStateException("No context available to configure the transaction preview.")
+      credentialRepository.configureTransactionPreview(context, credentialId, enabled, apiBaseUrl, token)
+    }
+
     AsyncFunction("configureIntentActions") { getPasskeyAction: String, createPasskeyAction: String ->
       val context = (appContext.reactContext ?: appContext.hostingRuntimeContext) as? Context
       if (context != null) {
@@ -157,14 +164,6 @@ class ReactNativePasskeyAutofillModule : Module() {
     // NoOp on Android. See `replaceCredentialIdentities` above.
     AsyncFunction("refreshCredentialIdentities") {
       // No-op: see comment above.
-    }
-
-    // NoOp on Android. The iOS implementation returns credentials stored in
-    // the shared App Group keychain used by the AutoFill extension. On
-    // Android, credentials are managed by the CredentialProviderService and
-    // are not exposed back to JS through this module.
-    AsyncFunction("getStoredCredentials") {
-      emptyList<Map<String, Any?>>()
     }
 
     // NoOp on Android. iOS exposes diagnostics from the shared App Group
@@ -187,7 +186,7 @@ class ReactNativePasskeyAutofillModule : Module() {
 
     AsyncFunction("getStoredCredentials") {
       val context = (appContext.reactContext ?: appContext.hostingRuntimeContext) as? Context
-        ?: return@AsyncFunction emptyList<Map<String, Any>>()
+        ?: return@AsyncFunction emptyList<Map<String, Any?>>()
       credentialRepository.getAllCredentials(context).map { credential ->
         mapOf(
           "credentialId" to credential.credentialId,
@@ -196,6 +195,8 @@ class ReactNativePasskeyAutofillModule : Module() {
           "userHandle" to credential.userHandle,
           "publicKey" to credential.publicKey,
           "derivationScheme" to credential.derivationScheme,
+          "showTransactionRequests" to credential.showTransactionRequests,
+          "previewApiBaseUrl" to credential.previewApiBaseUrl,
         )
       }
     }

@@ -51,6 +51,11 @@ struct StoredPasskeyCredential: Codable {
   /// root — re-deriving one against a different parent produces a different key
   /// and silently breaks the passkey the relying party already trusts.
   var derivationScheme: String? = nil
+  /// Akita: whether an assertion must first show the user a transaction preview
+  /// fetched from `previewApiBaseUrl` with `previewToken`.
+  var showTransactionRequests: Bool? = nil
+  var previewApiBaseUrl: String? = nil
+  var previewToken: String? = nil
 }
 
 /// The on-disk record format shared with the wallet's
@@ -226,6 +231,45 @@ final class PasskeyCredentialStore {
     #endif
   }
 
+  /// Akita: sets whether assertions with `credentialId` must show a transaction
+  /// preview first, and where to fetch it. Only this module's keystore passkey
+  /// records are updated.
+  func configureTransactionPreview(
+    credentialId: String,
+    enabled: Bool,
+    apiBaseUrl: String,
+    token: String
+  ) throws {
+    guard let masterKey = masterKey(),
+          let appGroup = Bundle.main.object(forInfoDictionaryKey: Self.defaultSuiteNameKey) as? String
+    else {
+      throw PasskeyCredentialStoreError.appGroupUnavailable
+    }
+    for candidate in credentialIdCandidates(credentialId) {
+      guard let payload = try? PasskeyKeystoreMMKV.string(forKey: candidate, appGroup: appGroup),
+            let keyData = try? decodeKeystorePayload(payload, masterKey: masterKey),
+            let type = keyData["type"] as? String,
+            type == "hd-derived-p256" || type == "xhd-derived-p256"
+      else { continue }
+      var updated = keyData
+      var metadata = keyData["metadata"] as? [String: Any] ?? [:]
+      metadata["showTransactionRequests"] = enabled
+      if enabled {
+        metadata["previewApiBaseUrl"] = apiBaseUrl
+        metadata["previewToken"] = token
+      } else {
+        metadata.removeValue(forKey: "previewApiBaseUrl")
+        metadata.removeValue(forKey: "previewToken")
+      }
+      updated["metadata"] = metadata
+      let encoded = try encodeKeyData(updated)
+      let encrypted = try encryptData(masterKey, encoded)
+      try PasskeyKeystoreMMKV.setString(encrypted, forKey: candidate, appGroup: appGroup)
+      return
+    }
+    throw PasskeyCredentialStoreError.credentialNotFound
+  }
+
   func removeCredential(id: String) throws {
     let candidateIds = credentialIdCandidates(id)
     markCredentialsDeleted(ids: candidateIds)
@@ -342,7 +386,10 @@ final class PasskeyCredentialStore {
       createdAt: metadata?["createdAt"] as? Double ?? Date().timeIntervalSince1970,
       lastUsedAt: metadata?["lastUsedAt"] as? Double,
       parentKeyId: parentKeyId,
-      derivationScheme: metadata?["scheme"] as? String
+      derivationScheme: metadata?["scheme"] as? String,
+      showTransactionRequests: metadata?["showTransactionRequests"] as? Bool,
+      previewApiBaseUrl: metadata?["previewApiBaseUrl"] as? String,
+      previewToken: metadata?["previewToken"] as? String
     )
   }
 
@@ -379,6 +426,15 @@ final class PasskeyCredentialStore {
     // against the same root even once the wallet points us at a different one.
     if let derivationScheme = credential.derivationScheme {
       metadata["scheme"] = derivationScheme
+    }
+    if let showTransactionRequests = credential.showTransactionRequests {
+      metadata["showTransactionRequests"] = showTransactionRequests
+    }
+    if let previewApiBaseUrl = credential.previewApiBaseUrl {
+      metadata["previewApiBaseUrl"] = previewApiBaseUrl
+    }
+    if let previewToken = credential.previewToken {
+      metadata["previewToken"] = previewToken
     }
 
     let keyData: [String: Any] = [
@@ -994,7 +1050,10 @@ extension StoredPasskeyCredential {
       createdAt: createdAt,
       lastUsedAt: lastUsedAt,
       parentKeyId: parentKeyId,
-      derivationScheme: derivationScheme
+      derivationScheme: derivationScheme,
+      showTransactionRequests: showTransactionRequests,
+      previewApiBaseUrl: previewApiBaseUrl,
+      previewToken: previewToken
     )
   }
 

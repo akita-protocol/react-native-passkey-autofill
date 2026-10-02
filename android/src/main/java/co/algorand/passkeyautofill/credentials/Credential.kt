@@ -37,4 +37,8 @@ data class Credential(
      * unchanged.
      */
     val derivationVersion: Int = PasskeyDerivation.VERSION_LEGACY_LABEL,
+    /** Akita: whether an assertion must first show a native transaction preview. */
+    val showTransactionRequests: Boolean = false,
+    val previewApiBaseUrl: String? = null,
+    val previewToken: String? = null,
 )

@@ -222,6 +222,13 @@ interface CredentialRepository {
      * opened to prove ownership, removes nothing.
      */
     fun deleteCredential(context: Context, credentialId: String)
+
+    /**
+     * Akita: sets whether assertions with `credentialId` must show a native
+     * transaction preview first, and where to fetch it. Only a sealed passkey
+     * record this module owns is rewritten; throws if there is none.
+     */
+    fun configureTransactionPreview(context: Context, credentialId: String, enabled: Boolean, apiBaseUrl: String, token: String)
     fun recordCredentialUsage(context: Context, credentialId: ByteArray)
 
     fun getBiometricCipherForEncryption(context: Context, requirement: BiometricRequirement): Cipher
@@ -347,6 +354,9 @@ class Repository() : CredentialRepository {
         credential.parentKeyId?.let { metadata.put("parentKeyId", it) }
         credential.derivationScheme?.let { metadata.put("scheme", it) }
         metadata.put("derivationVersion", credential.derivationVersion)
+        metadata.put("showTransactionRequests", credential.showTransactionRequests)
+        credential.previewApiBaseUrl?.let { metadata.put("previewApiBaseUrl", it) }
+        credential.previewToken?.let { metadata.put("previewToken", it) }
         keyData.put("metadata", metadata)
 
         // 2. Encode matching react-native-keystore's encode()
@@ -454,6 +464,9 @@ class Repository() : CredentialRepository {
             derivationScheme = metadata?.optString("scheme").takeUnless { it.isNullOrEmpty() },
             derivationVersion = metadata?.optInt("derivationVersion", PasskeyDerivation.VERSION_LEGACY_LABEL)
                 ?: PasskeyDerivation.VERSION_LEGACY_LABEL,
+            showTransactionRequests = metadata?.optBoolean("showTransactionRequests", false) ?: false,
+            previewApiBaseUrl = metadata?.optString("previewApiBaseUrl")?.takeIf { it.isNotEmpty() },
+            previewToken = metadata?.optString("previewToken")?.takeIf { it.isNotEmpty() },
         )
     }
 
@@ -480,6 +493,9 @@ class Repository() : CredentialRepository {
             parentKeyId = metadata.optString("parentKeyId").takeUnless { it.isEmpty() },
             derivationScheme = metadata.optString("scheme").takeUnless { it.isEmpty() },
             derivationVersion = metadata.optInt("derivationVersion", PasskeyDerivation.VERSION_LEGACY_LABEL),
+            showTransactionRequests = metadata.optBoolean("showTransactionRequests", false),
+            previewApiBaseUrl = metadata.optString("previewApiBaseUrl").takeIf { it.isNotEmpty() },
+            previewToken = metadata.optString("previewToken").takeIf { it.isNotEmpty() },
         )
     }
 
@@ -1072,6 +1088,45 @@ class Repository() : CredentialRepository {
         } catch (e: Exception) {
             PasskeyLog.e(CredentialRepository.TAG, "Error deleting credential", e)
         }
+    }
+
+    override fun configureTransactionPreview(
+        context: Context,
+        credentialId: String,
+        enabled: Boolean,
+        apiBaseUrl: String,
+        token: String,
+    ) {
+        val mmkv = getPasskeysMMKV(context)
+        val masterKey = getMasterKey(context) ?: throw MasterKeyUnavailableException()
+        for (candidate in credentialIdCandidates(credentialId)) {
+            val payload = mmkv.decodeString(candidate) ?: continue
+            val keyData = try {
+                KeystoreRecords.decodeLegacyRecord(payload, masterKey)
+            } catch (e: Exception) {
+                continue
+            }
+            if (!KeystoreRecords.isPasskeyRecordType(keyData.optString("type", ""))) continue
+            val metadata = keyData.optJSONObject("metadata") ?: JSONObject()
+            metadata.put("showTransactionRequests", enabled)
+            if (enabled) {
+                metadata.put("previewApiBaseUrl", apiBaseUrl)
+                metadata.put("previewToken", token)
+            } else {
+                metadata.remove("previewApiBaseUrl")
+                metadata.remove("previewToken")
+            }
+            keyData.put("metadata", metadata)
+            val encoded = AndroidBase64.encodeToString(
+                keyData.toString().toByteArray(Charsets.UTF_8),
+                AndroidBase64.URL_SAFE or AndroidBase64.NO_WRAP,
+            )
+            check(mmkv.encode(candidate, KeystoreRecords.sealEnvelope(masterKey, encoded))) {
+                "Failed to write the transaction preview configuration"
+            }
+            return
+        }
+        throw IllegalArgumentException("Passkey credential was not found")
     }
 
     override fun recordCredentialUsage(context: Context, credentialId: ByteArray) {

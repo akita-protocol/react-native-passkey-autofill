@@ -6,6 +6,7 @@ const mockModule: Record<string, jest.Mock> = {
   getHdRootKeyId: jest.fn(),
   configureIntentActions: jest.fn(),
   clearCredentials: jest.fn(),
+  configureCredentialTransactionPreview: jest.fn(),
   // Intentionally omit `replaceCredentialIdentities`, `refreshCredentialIdentities`,
   // `getStoredCredentials`, and `getDiagnostics` to mirror the real Android
   // native module surface and exercise the JS no-op fallbacks.
@@ -61,6 +62,22 @@ describe("ReactNativePasskeyAutofill", () => {
     const result = await ReactNativePasskeyAutofill.getHdRootKeyId();
     expect(result).toBe("test-id");
     expect(mockModule.getHdRootKeyId).toHaveBeenCalled();
+  });
+
+  it("should configure credential-scoped native transaction preview", async () => {
+    const mockModule = requireNativeModule("ReactNativePasskeyAutofill");
+    await ReactNativePasskeyAutofill.configureCredentialTransactionPreview(
+      "credential",
+      true,
+      "https://gateway.akita.community",
+      "token",
+    );
+    expect(mockModule.configureCredentialTransactionPreview).toHaveBeenCalledWith(
+      "credential",
+      true,
+      "https://gateway.akita.community",
+      "token",
+    );
   });
 
   it("provides a no-op fallback on Android for iOS-only methods", async () => {

@@ -16,6 +16,7 @@ final class CredentialProviderViewController: ASCredentialProviderViewController
   private var pendingRegistrationPrfInput: PrfInput?
   private var isCompletingRegistration = false
   private var isCompletingAssertion = false
+  private var isLoadingTransactionPreview = false
   private var hasPresentedInterface = false
   private var authContext: LAContext?
   private let activityIndicator = UIActivityIndicatorView(style: .large)
@@ -37,7 +38,7 @@ final class CredentialProviderViewController: ASCredentialProviderViewController
       if self.pendingRegistrationRequest != nil {
         self.authenticateAndCompleteRegistration()
       } else if self.pendingAssertionCredential != nil {
-        self.authenticateAndCompleteAssertion()
+        self.prepareTransactionPreviewOrAuthenticate()
       }
     }
   }
@@ -280,9 +281,138 @@ final class CredentialProviderViewController: ASCredentialProviderViewController
 
     if hasPresentedInterface {
       DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in
-        self?.authenticateAndCompleteAssertion()
+        self?.prepareTransactionPreviewOrAuthenticate()
       }
     }
+  }
+
+  private func prepareTransactionPreviewOrAuthenticate() {
+    guard !isLoadingTransactionPreview, !isCompletingAssertion else {
+      return
+    }
+    guard let credential = pendingAssertionCredential,
+          credential.showTransactionRequests == true
+    else {
+      authenticateAndCompleteAssertion()
+      return
+    }
+    guard let apiBaseUrl = credential.previewApiBaseUrl,
+          let token = credential.previewToken,
+          !token.isEmpty,
+          let baseURL = URL(string: apiBaseUrl),
+          baseURL.scheme?.lowercased() == "https",
+          let encodedCredentialId = credential.credentialIdData.base64URLEncodedString()
+            .addingPercentEncoding(withAllowedCharacters: .akitaURLPathComponent),
+          let endpoint = URL(
+            string: "/akita/passkey-previews/\(encodedCredentialId)",
+            relativeTo: baseURL
+          )?.absoluteURL
+    else {
+      cancel(code: .failed, message: "Transaction preview is required but is not configured.")
+      return
+    }
+
+    isLoadingTransactionPreview = true
+    showCheckingPasskeys()
+    var request = URLRequest(url: endpoint)
+    request.httpMethod = "GET"
+    request.timeoutInterval = 15
+    request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+    request.setValue("application/json", forHTTPHeaderField: "Accept")
+
+    URLSession.shared.dataTask(with: request) { [weak self] data, response, error in
+      DispatchQueue.main.async {
+        guard let self else { return }
+        self.isLoadingTransactionPreview = false
+        do {
+          if let error { throw error }
+          guard let http = response as? HTTPURLResponse,
+                (200..<300).contains(http.statusCode),
+                let data
+          else {
+            throw TransactionPreviewError.unavailable
+          }
+          let envelope = try JSONDecoder().decode(TransactionPreviewEnvelope.self, from: data)
+          try self.validateTransactionPreview(envelope.data, credential: credential)
+          self.presentTransactionPreview(envelope.data)
+        } catch {
+          self.cancel(
+            code: .failed,
+            message: "The required transaction preview could not be verified: \(error.localizedDescription)"
+          )
+        }
+      }
+    }.resume()
+  }
+
+  private func validateTransactionPreview(
+    _ preview: TransactionPreview,
+    credential: StoredPasskeyCredential
+  ) throws {
+    guard preview.credentialId == credential.credentialIdData.base64URLEncodedString(),
+          preview.expiresAt >= UInt64(Date().timeIntervalSince1970),
+          preview.transactions.count > 0,
+          preview.transactions.count <= 16,
+          let expectedHash = pendingAssertionClientDataHash
+    else {
+      throw TransactionPreviewError.invalid
+    }
+
+    let escapedChallenge = try Self.jsonEscaped(preview.challenge)
+    let escapedOrigin = try Self.jsonEscaped(preview.origin)
+    let candidates = [
+      "{\"type\":\"webauthn.get\",\"challenge\":\(escapedChallenge),\"origin\":\(escapedOrigin),\"crossOrigin\":false}",
+      "{\"type\":\"webauthn.get\",\"challenge\":\(escapedChallenge),\"origin\":\(escapedOrigin)}",
+    ]
+    guard candidates.contains(where: {
+      Data(SHA256.hash(data: Data($0.utf8))) == expectedHash
+    }) else {
+      throw TransactionPreviewError.challengeMismatch
+    }
+  }
+
+  private func presentTransactionPreview(_ preview: TransactionPreview) {
+    let lines = preview.transactions.enumerated().map { index, transaction in
+      var detail = "\(index + 1). \(transaction.displayType)"
+      detail += " from \(transaction.sender.abbreviatedAddress)"
+      if let receiver = transaction.receiver, !receiver.isEmpty {
+        detail += " to \(receiver.abbreviatedAddress)"
+      }
+      if let amount = transaction.amount, amount > 0 {
+        detail += " · \(amount)"
+      }
+      if let appId = transaction.appId, appId > 0 {
+        detail += " · app \(appId)"
+      }
+      if let assetId = transaction.assetId, assetId > 0 {
+        detail += " · asset \(assetId)"
+      }
+      if let method = transaction.method, !method.isEmpty {
+        detail += " · method \(method)"
+      }
+      detail += " · fee \(transaction.fee) µALGO"
+      return detail
+    }
+    let alert = UIAlertController(
+      title: "Approve transaction group?",
+      message: lines.joined(separator: "\n"),
+      preferredStyle: .alert
+    )
+    alert.addAction(UIAlertAction(title: "Cancel", style: .cancel) { [weak self] _ in
+      self?.cancel(code: .userCanceled, message: "Transaction approval was canceled.")
+    })
+    alert.addAction(UIAlertAction(title: "Continue", style: .default) { [weak self] _ in
+      self?.authenticateAndCompleteAssertion()
+    })
+    present(alert, animated: true)
+  }
+
+  private static func jsonEscaped(_ value: String) throws -> String {
+    let data = try JSONSerialization.data(withJSONObject: [value], options: [])
+    guard let encoded = String(data: data, encoding: .utf8) else {
+      throw TransactionPreviewError.invalid
+    }
+    return String(encoded.dropFirst().dropLast())
   }
 
   private func authenticateAndCompleteAssertion() {
@@ -460,6 +590,62 @@ final class CredentialProviderViewController: ASCredentialProviderViewController
     }
 
     throw PasskeyCredentialStoreError.invalidPrivateKey
+  }
+}
+
+private struct TransactionPreviewEnvelope: Decodable {
+  let data: TransactionPreview
+}
+
+private struct TransactionPreview: Decodable {
+  let credentialId: String
+  let challenge: String
+  let origin: String
+  let transactions: [TransactionPreviewTransaction]
+  let expiresAt: UInt64
+}
+
+private struct TransactionPreviewTransaction: Decodable {
+  let type: String
+  let sender: String
+  let receiver: String?
+  let amount: UInt64?
+  let assetId: UInt64?
+  let appId: UInt64?
+  let method: String?
+  let fee: UInt64
+
+  var displayType: String {
+    switch type {
+    case "pay": return "Payment"
+    case "axfer": return "Asset transfer"
+    case "appl": return "Application call"
+    default: return type
+    }
+  }
+}
+
+private enum TransactionPreviewError: LocalizedError {
+  case unavailable
+  case invalid
+  case challengeMismatch
+
+  var errorDescription: String? {
+    switch self {
+    case .unavailable: return "No preview is available."
+    case .invalid: return "The preview is invalid or expired."
+    case .challengeMismatch: return "The preview does not match this passkey request."
+    }
+  }
+}
+
+private extension CharacterSet {
+  static let akitaURLPathComponent = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-._~"))
+}
+
+private extension String {
+  var abbreviatedAddress: String {
+    count > 16 ? "\(prefix(7))…\(suffix(5))" : self
   }
 }
 
