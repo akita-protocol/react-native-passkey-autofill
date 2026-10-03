@@ -84,9 +84,23 @@ class MasterKeyUnavailableException(
     message: String = "Passkey master key unavailable: the wallet has not shared it with this process (setMasterKey)",
 ) : IllegalStateException(message)
 
+/**
+ * Akita: a record already exists for this credential id (under any alias).
+ * Passkeys are never overwritten, so an existing preview policy cannot be
+ * dropped by registering or restoring the same credential again. Surfaces as
+ * WebAuthn's InvalidStateError on creation.
+ */
+class CredentialAlreadyExistsException(
+    message: String = "A passkey with this credential id already exists",
+) : IllegalStateException(message)
+
 interface CredentialRepository {
     val keyStore: KeyStore
+    /** Seals a NEW credential; throws [CredentialAlreadyExistsException] if any record exists for its id. */
     fun saveCredential(context: Context, credential: Credential, biometricCipher: Cipher? = null)
+
+    /** Whether any record — sealed flat or `k/` metadata, under any id encoding — exists for `credentialId`. */
+    fun hasCredentialRecord(context: Context, credentialId: ByteArray): Boolean
     fun generateCredentialId(keyPair: KeyPair): ByteArray
     fun getKeyPair(context: Context, credentialId: ByteArray, biometricCipher: Cipher? = null): KeyPair?
     /** Akita: when the HD root is the parent, [userHandle] is the SiteCredentialDerivation handle, used verbatim. */
@@ -317,6 +331,12 @@ class Repository() : CredentialRepository {
     override fun saveCredential(context: Context, credential: Credential, biometricCipher: Cipher?) {
         PasskeyLog.d(CredentialRepository.TAG, "saveCredential started")
         val mmkv = getPasskeysMMKV(context)
+        val newId = try {
+            AndroidBase64.decode(credential.credentialId, AndroidBase64.DEFAULT)
+        } catch (e: IllegalArgumentException) {
+            throw IllegalArgumentException("Credential id is not base64", e)
+        }
+        if (hasCredentialRecord(context, newId)) throw CredentialAlreadyExistsException()
         
         // 1. Create KeyData matching @algorandfoundation/keystore
         val keyData = JSONObject()
@@ -370,6 +390,14 @@ class Repository() : CredentialRepository {
         val sealed = KeystoreRecords.sealEnvelope(masterKey, base64urlJson)
         check(mmkv.encode(credential.credentialId, sealed)) {
             "Failed to write sealed credential record for ${credential.origin}"
+        }
+    }
+
+    override fun hasCredentialRecord(context: Context, credentialId: ByteArray): Boolean {
+        val mmkv = getPasskeysMMKV(context)
+        val id = AndroidBase64.encodeToString(credentialId, AndroidBase64.DEFAULT).trim()
+        return credentialIdCandidates(id).any {
+            mmkv.containsKey(it) || mmkv.containsKey(KeystoreRecords.metadataKey(it))
         }
     }
 

@@ -6,12 +6,13 @@ import Foundation
 @main
 struct PasskeyCredentialStorageHarness {
   static func main() throws {
-    guard CommandLine.arguments.count == 2 else {
-      throw HarnessError("usage: harness <PasskeyCredentialStore.swift>")
+    guard CommandLine.arguments.count == 3 else {
+      throw HarnessError("usage: harness <PasskeyCredentialStore.swift> <CredentialProviderViewController.swift>")
     }
     try testMigrationPlan()
     try assertStoreInvariants(sourcePath: CommandLine.arguments[1])
-    print("Validated legacy credential migration and sealed-only credential storage.")
+    try assertRegistrationInvariants(sourcePath: CommandLine.arguments[2])
+    print("Validated legacy credential migration, sealed-only storage, and no-overwrite registration.")
   }
 
   private static let required = TransactionPreviewPolicy.required(
@@ -106,6 +107,20 @@ struct PasskeyCredentialStorageHarness {
       "policy.write(to: &entry)",
     ] {
       try require(!source.contains(fragment), "store still has a plaintext write path: \(fragment)")
+    }
+  }
+
+  /// Re-registering an existing (deterministically derived) credential must fail
+  /// rather than overwrite it and its preview policy.
+  private static func assertRegistrationInvariants(sourcePath: String) throws {
+    let source = try String(contentsOfFile: sourcePath, encoding: .utf8)
+    for fragment in [
+      "store.hasCredentialRecord(id: credentialId)",
+      "request.excludedCredentials",
+      "return .matchedExcludedCredential",
+      "catch PasskeyCredentialStoreError.credentialAlreadyExists",
+    ] {
+      try require(source.contains(fragment), "registration is missing: \(fragment)")
     }
   }
 

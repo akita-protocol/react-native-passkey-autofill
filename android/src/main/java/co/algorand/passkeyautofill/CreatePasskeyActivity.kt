@@ -18,6 +18,8 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.credentials.CreatePublicKeyCredentialRequest
 import androidx.credentials.CreatePublicKeyCredentialResponse
 import androidx.credentials.exceptions.CreateCredentialUnknownException
+import androidx.credentials.exceptions.domerrors.InvalidStateError
+import androidx.credentials.exceptions.publickeycredential.CreatePublicKeyCredentialDomException
 import androidx.credentials.provider.PendingIntentHandler
 import androidx.credentials.provider.ProviderCreateCredentialRequest
 import androidx.credentials.webauthn.AuthenticatorAttestationResponse
@@ -27,7 +29,9 @@ import co.algorand.passkeyautofill.auth.BiometricRequirement
 import co.algorand.passkeyautofill.auth.UserVerification
 import co.algorand.passkeyautofill.credentials.CredentialRepository
 import co.algorand.passkeyautofill.credentials.Credential
+import co.algorand.passkeyautofill.credentials.CredentialAlreadyExistsException
 import co.algorand.passkeyautofill.credentials.MasterKeyUnavailableException
+import co.algorand.passkeyautofill.credentials.RegistrationConflict
 import co.algorand.passkeyautofill.credentials.SiteCredentialDerivation
 import co.algorand.passkeyautofill.utils.PasskeyUtils
 import co.algorand.passkeyautofill.utils.PrivilegedBrowserAllowlist
@@ -380,6 +384,18 @@ class CreatePasskeyActivity : AppCompatActivity() {
             val credentialId = credentialRepository.generateCredentialId(keyPair)
             val credentialIdBase64 = AndroidBase64.encodeToString(credentialId, AndroidBase64.NO_WRAP)
 
+            // Derivation is deterministic: registering the same account again yields
+            // the same credential id. Refuse it (InvalidStateError) — whether the
+            // relying party listed it in excludeCredentials or it is already stored
+            // here — so an existing passkey, and its preview policy, is never replaced.
+            if (RegistrationConflict.refuses(
+                    credentialId,
+                    requestOptions.excludeCredentials.map { it.id },
+                    credentialRepository.hasCredentialRecord(this@CreatePasskeyActivity, credentialId),
+                )) {
+                throw CredentialAlreadyExistsException()
+            }
+
             val credential = Credential(
                 credentialId = credentialIdBase64,
                 origin = origin,
@@ -510,6 +526,18 @@ class CreatePasskeyActivity : AppCompatActivity() {
             ReactNativePasskeyAutofillModule.instance?.sendEvent("onPasskeyAdded", Bundle().apply {
                 putBoolean("success", true)
             })
+            finish()
+        } catch (e: CredentialAlreadyExistsException) {
+            PasskeyLog.w(TAG, "Passkey creation refused: the credential already exists")
+            val errorIntent = Intent()
+            PendingIntentHandler.setCreateCredentialException(
+                errorIntent,
+                CreatePublicKeyCredentialDomException(
+                    InvalidStateError(),
+                    "A passkey for this account already exists.",
+                ),
+            )
+            setResult(Activity.RESULT_OK, errorIntent)
             finish()
         } catch (e: MasterKeyUnavailableException) {
             // Nothing was written. Retrying from the UI cannot help — only the

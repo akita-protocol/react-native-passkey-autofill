@@ -596,6 +596,20 @@ final class CredentialProviderViewController: ASCredentialProviderViewController
       }
       let publicKey = privateKey.publicKey.derRepresentation
       let credentialId = WebAuthn.credentialId(publicKey: publicKey)
+      // Derivation is deterministic: registering the same account again yields
+      // the same credential id. Refuse it (WebAuthn InvalidStateError) — whether
+      // the relying party listed it in excludeCredentials or it is already stored
+      // here — so an existing passkey, and its preview policy, is never replaced.
+      if Self.excludedCredentialIds(snapshot.request).contains(credentialId)
+        || store.hasCredentialRecord(id: credentialId)
+      {
+        cancelOperation(
+          operationID: operationID,
+          code: Self.existingCredentialErrorCode,
+          message: "A passkey for this account already exists."
+        )
+        return
+      }
       let storedCredential = StoredPasskeyCredential(
         credentialId: credentialId.base64EncodedString(),
         relyingPartyIdentifier: identity.relyingPartyIdentifier,
@@ -674,6 +688,12 @@ final class CredentialProviderViewController: ASCredentialProviderViewController
         snapshot: snapshot,
         operationID: operationID
       )
+    } catch PasskeyCredentialStoreError.credentialAlreadyExists {
+      cancelOperation(
+        operationID: operationID,
+        code: Self.existingCredentialErrorCode,
+        message: "A passkey for this account already exists."
+      )
     } catch {
       cancelOperation(
         operationID: operationID,
@@ -681,6 +701,23 @@ final class CredentialProviderViewController: ASCredentialProviderViewController
         message: error.localizedDescription
       )
     }
+  }
+
+  /// The credential ids the relying party asked not to re-register.
+  private static func excludedCredentialIds(_ request: ASPasskeyCredentialRequest) -> Set<Data> {
+    if #available(iOSApplicationExtension 18.0, *) {
+      return Set((request.excludedCredentials ?? []).map(\.credentialID))
+    }
+    return []
+  }
+
+  /// Surfaces to the relying party as WebAuthn's InvalidStateError where iOS
+  /// supports it.
+  private static var existingCredentialErrorCode: ASExtensionError.Code {
+    if #available(iOSApplicationExtension 18.0, *) {
+      return .matchedExcludedCredential
+    }
+    return .failed
   }
 
   private func submitRegistrationToApple(
