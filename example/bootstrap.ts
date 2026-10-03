@@ -1,36 +1,38 @@
 import { Store } from "@tanstack/store";
-import ReactNativePasskeyAutofill from "@algorandfoundation/react-native-passkey-autofill";
-import {
-  clearKeyData,
-  initializeKeyStore,
-  Key,
-  KeyData,
-  KeyStoreState,
-} from "@algorandfoundation/keystore";
+import ReactNativePasskeyAutofill from "@akta/react-native-passkey-autofill";
+import { initializeKeyStore, Key, KeyData, KeyStoreState } from "@algorandfoundation/keystore";
 import { fetchSecret, getMasterKey, storage } from "@algorandfoundation/react-native-keystore";
 import { keyStore } from "./stores/keystore";
 import { passkeysStore } from "./stores/passkeys";
+
+/**
+ * Fetches a single secret, tolerating entries this build cannot decrypt.
+ *
+ * The keystore MMKV is shared (multi-process) and may hold records sealed by a
+ * different payload format than this example's keystore dependency understands
+ * (e.g. AES-GCM with the auth tag appended to the ciphertext instead of a
+ * separate `tag` field). Decrypting such a record throws; we swallow that so a
+ * single unreadable entry never aborts a full reload; the readable keys still
+ * load and flows like passkey registration can complete.
+ */
+async function safeFetchSecret(keyId: string): Promise<KeyData | null> {
+  try {
+    return await fetchSecret<KeyData>({ keyId, options: { masterKey: await getMasterKey() } });
+  } catch (e) {
+    console.warn(`Skipping undecryptable keystore entry ${keyId}`, e);
+    return null;
+  }
+}
 
 /**
  * This is required when a key is modified outside of our control
  * This eventually will just be a part of the passkey extension.
  */
 export async function fullReload() {
-  /*
-        const _keys = storage.getAllKeys()
-        _keys.forEach((keyId) => {
-            const secret = storage.getString(keyId)
-        })
-    */
-
-  const secrets = await Promise.all(
-    storage
-      .getAllKeys()
-      .map(async (keyId) => fetchSecret<KeyData>({ keyId, masterKey: await getMasterKey() })),
-  );
+  const secrets = await Promise.all(storage.getAllKeys().map((keyId) => safeFetchSecret(keyId)));
   const keys = secrets
     .filter((k) => k !== null)
-    .map(({ privateKey, ...rest }: KeyData) => rest) as Key[];
+    .map(({ privateKey: _privateKey, ...rest }: KeyData) => rest) as Key[];
   initializeKeyStore({
     store: keyStore as unknown as Store<KeyStoreState>,
     keys,
@@ -41,21 +43,18 @@ export async function bootstrap() {
   // Configure Autofill
   const masterKey = await getMasterKey();
 
-  // Set master key in native side BEFORE reloading
-  await ReactNativePasskeyAutofill.setMasterKey(masterKey.toString("hex"));
+  // Set master key in native side BEFORE reloading. Pass the raw bytes (not a
+  // hex string) so the secret never becomes a non-zeroable JS string.
+  await ReactNativePasskeyAutofill.setMasterKey(Uint8Array.from(masterKey));
 
   // Reload keys into the JS store
   await fullReload();
 
-  const secrets = await Promise.all(
-    storage
-      .getAllKeys()
-      .map(async (keyId) => fetchSecret<KeyData>({ keyId, masterKey: await getMasterKey() })),
-  );
+  const secrets = await Promise.all(storage.getAllKeys().map((keyId) => safeFetchSecret(keyId)));
 
   const keys = secrets
     .filter((k) => k !== null)
-    .map(({ privateKey, ...rest }: KeyData) => rest) as Key[];
+    .map(({ privateKey: _privateKey, ...rest }: KeyData) => rest) as Key[];
 
   const hdRootKey = keys.find(
     (k) => k.type === "hd-root-key" || k.type === "xhd-root-key" || k.type === "hd-seed",
@@ -77,16 +76,26 @@ export async function bootstrap() {
 async function syncNativePasskeys() {
   const credentials = await ReactNativePasskeyAutofill.getStoredCredentials();
   passkeysStore.setState((state) => {
+    // Index existing passkeys by id so updates collapse to a single entry.
     const existingById = new Map(state.passkeys.map((passkey) => [passkey.id, passkey]));
+
     for (const credential of credentials) {
       const id = credential.credentialId;
       const publicKey = credential.publicKey ?? credential.publicKeyBase64;
       if (!id || !publicKey) continue;
 
+      const publicKeyBytes = base64ToBytes(publicKey);
+
+      for (const [existingId, existing] of existingById) {
+        if (existingId !== id && publicKeysEqual(existing.publicKey, publicKeyBytes)) {
+          existingById.delete(existingId);
+        }
+      }
+
       existingById.set(id, {
         id,
         name: credential.userName ?? credential.relyingPartyIdentifier ?? "Unnamed Passkey",
-        publicKey: base64ToBytes(publicKey),
+        publicKey: publicKeyBytes,
         algorithm: "ES256",
         metadata: {
           origin: credential.relyingPartyIdentifier,
@@ -104,4 +113,12 @@ async function syncNativePasskeys() {
 
 function base64ToBytes(value: string): Uint8Array {
   return Uint8Array.from(Buffer.from(value.replace(/-/g, "+").replace(/_/g, "/"), "base64"));
+}
+
+function publicKeysEqual(a: Uint8Array | undefined, b: Uint8Array): boolean {
+  if (!a || a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) {
+    if (a[i] !== b[i]) return false;
+  }
+  return true;
 }

@@ -1,6 +1,8 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
           xmlns:tools="http://schemas.android.com/tools">
     <uses-permission android:name="android.permission.USE_BIOMETRIC"/>
+    <!-- Refreshes Google's privileged-browser allowlist (PrivilegedBrowserAllowlist). -->
+    <uses-permission android:name="android.permission.INTERNET"/>
     <application>
         <service
             android:name=".service.PasskeyAutofillCredentialProviderService"
@@ -16,8 +18,12 @@
                 android:name="android.credentials.provider"
                 android:resource="@xml/provider" />
         </service>
-        <activity android:name="co.algorand.passkeyautofill.GetPasskeyActivity" 
-            android:exported="true" 
+        <!--
+          Not exported: both activities trust the extras they are started with, so only the
+          provider service's own PendingIntent (explicit component, this app's UID) may start them.
+        -->
+        <activity android:name="co.algorand.passkeyautofill.GetPasskeyActivity"
+            android:exported="false"
             android:launchMode="singleTop"
             android:theme="@style/Theme.PasskeyAutofill.Dialog">
             <intent-filter>
@@ -25,8 +31,8 @@
                 <category android:name="android.intent.category.DEFAULT"/>
             </intent-filter>
         </activity>
-        <activity android:name="co.algorand.passkeyautofill.CreatePasskeyActivity" 
-            android:exported="true" 
+        <activity android:name="co.algorand.passkeyautofill.CreatePasskeyActivity"
+            android:exported="false"
             android:launchMode="singleTop"
             android:theme="@style/Theme.PasskeyAutofill.Dialog">
             <intent-filter>

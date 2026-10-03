@@ -1,14 +1,110 @@
-# [1.0.0-canary.16](https://github.com/algorandfoundation/react-native-passkey-autofill/compare/v1.0.0-canary.15...v1.0.0-canary.16) (2026-05-15)
-
+# [1.0.0-canary.29](https://github.com/algorandfoundation/react-native-passkey-autofill/compare/v1.0.0-canary.28...v1.0.0-canary.29) (2026-09-30)
 
 ### Bug Fixes
 
-* align ios autofill root key flow ([1287f57](https://github.com/algorandfoundation/react-native-passkey-autofill/commit/1287f57952b41829032ef368bad826624375e9a3))
+- **android:** stop exporting the passkey activities ([dfb376e](https://github.com/algorandfoundation/react-native-passkey-autofill/commit/dfb376e84aeef3fea36d742fa338dcefde153b3e))
 
+# [1.0.0-canary.28](https://github.com/algorandfoundation/react-native-passkey-autofill/compare/v1.0.0-canary.27...v1.0.0-canary.28) (2026-09-29)
+
+### Bug Fixes
+
+- restrict client hash to privileged list ([d17cea0](https://github.com/algorandfoundation/react-native-passkey-autofill/commit/d17cea058745b5de0103d4ccd767885a2d185981))
+
+# [1.0.0-canary.27](https://github.com/algorandfoundation/react-native-passkey-autofill/compare/v1.0.0-canary.26...v1.0.0-canary.27) (2026-09-22)
+
+### Bug Fixes
+
+- **android:** drop the legacy re-seal migration; the unsealed write path was unreachable ([12e16f4](https://github.com/algorandfoundation/react-native-passkey-autofill/commit/12e16f4c9a1ac3e6c583e3a1026d9799a10801e3)), closes [#24](https://github.com/algorandfoundation/react-native-passkey-autofill/issues/24)
+- **android:** fail closed when the passkey master key is unavailable ([56dbb8b](https://github.com/algorandfoundation/react-native-passkey-autofill/commit/56dbb8ba78b9b517b1f2fa8db8e75cdf527a0909))
+- **android:** offer and sign only credentials scoped to the requesting relying party ([ce715f5](https://github.com/algorandfoundation/react-native-passkey-autofill/commit/ce715f5c680279478baea3b3ac87e4d663794244))
+- **android:** only delete records this module owns from the shared keystore ([2fe3d08](https://github.com/algorandfoundation/react-native-passkey-autofill/commit/2fe3d088dafaaf6c34d755233dc77ba2fd6b9188))
+- **android:** route logging through PasskeyLog and stop logging ceremony data ([15ee108](https://github.com/algorandfoundation/react-native-passkey-autofill/commit/15ee108e4c9171548f27ab1b8a4a9fc98a85812c))
+- **android:** set the WebAuthn UV flag only when a verification ceremony ran ([a2321b5](https://github.com/algorandfoundation/react-native-passkey-autofill/commit/a2321b501bb3211e3e4c617eb806244fcc0eb51a))
+- enumerate passkeys as metadata only; open one private key after selection ([7b03f81](https://github.com/algorandfoundation/react-native-passkey-autofill/commit/7b03f81c171ed686e8410f8e3fe3dbdab5b987cf))
+- **ios:** pin the deterministic-P256 Swift package to a commit revision ([a9e8c85](https://github.com/algorandfoundation/react-native-passkey-autofill/commit/a9e8c85653239d44acc053933f55da803175480f))
+
+# [1.0.0-canary.26](https://github.com/algorandfoundation/react-native-passkey-autofill/compare/v1.0.0-canary.25...v1.0.0-canary.26) (2026-08-17)
+
+### Bug Fixes
+
+- use parent.bytes for PRF registration derived secret ([48e594a](https://github.com/algorandfoundation/react-native-passkey-autofill/commit/48e594a06d96bdbc6063bc4750f3699404d88a1b))
+
+# [1.0.0-canary.25](https://github.com/algorandfoundation/react-native-passkey-autofill/compare/v1.0.0-canary.24...v1.0.0-canary.25) (2026-08-13)
+
+### Bug Fixes
+
+- security patches ([fcfb67f](https://github.com/algorandfoundation/react-native-passkey-autofill/commit/fcfb67f5537318b8d75d863cd265f92758f14cee))
+
+# [1.0.0-canary.24](https://github.com/algorandfoundation/react-native-passkey-autofill/compare/v1.0.0-canary.23...v1.0.0-canary.24) (2026-08-13)
+
+### Bug Fixes
+
+- update vendored keystore packages ([4ae89a7](https://github.com/algorandfoundation/react-native-passkey-autofill/commit/4ae89a704074ba0703bd264dd5f446b19e4cc1a2))
+
+# [1.0.0-canary.23](https://github.com/algorandfoundation/react-native-passkey-autofill/compare/v1.0.0-canary.22...v1.0.0-canary.23) (2026-08-13)
 
 ### Features
 
-* add iOS passkey autofill provider ([9aad8f8](https://github.com/algorandfoundation/react-native-passkey-autofill/commit/9aad8f8ceb2ad54cf53847b60dd6e70d5b2a1f2b))
+- keystore migrations ([00f01b6](https://github.com/algorandfoundation/react-native-passkey-autofill/commit/00f01b6ce17842a58e989a71696fe809d969b002))
+
+# [1.0.0-canary.22](https://github.com/algorandfoundation/react-native-passkey-autofill/compare/v1.0.0-canary.21...v1.0.0-canary.22) (2026-07-15)
+
+### Bug Fixes
+
+- write keychain group into the extension Info.plist so the extension can resolve it ([a98ea08](https://github.com/algorandfoundation/react-native-passkey-autofill/commit/a98ea0827164b5402a3f530579cd6908e52c0242))
+
+### Features
+
+- accept the master key as raw bytes instead of a hex string ([86f85a8](https://github.com/algorandfoundation/react-native-passkey-autofill/commit/86f85a8667489f938266188f7551598c3e14cc0c))
+- store the iOS master key in the Keychain instead of plaintext UserDefaults ([00dd362](https://github.com/algorandfoundation/react-native-passkey-autofill/commit/00dd362d7214e91296982e012aedd817b09ab83d))
+
+# [1.0.0-canary.21](https://github.com/algorandfoundation/react-native-passkey-autofill/compare/v1.0.0-canary.20...v1.0.0-canary.21) (2026-06-11)
+
+### Bug Fixes
+
+- check for quotes for the DEVELOPMENT_TEAM ([d4aa43d](https://github.com/algorandfoundation/react-native-passkey-autofill/commit/d4aa43dc74c318f9ac8a4d2d4b761d30bb44d576))
+- fix missing prf file and target iOS 26 shapes ([150a161](https://github.com/algorandfoundation/react-native-passkey-autofill/commit/150a1615b7e4588bea91bf3900f82f054c939276))
+
+# [1.0.0-canary.20](https://github.com/algorandfoundation/react-native-passkey-autofill/compare/v1.0.0-canary.19...v1.0.0-canary.20) (2026-06-10)
+
+### Bug Fixes
+
+- **Android:** improve setting intent handling, gradle includes pickFirst for MMKV. ([27af9e4](https://github.com/algorandfoundation/react-native-passkey-autofill/commit/27af9e470fb2d53f375422b246e3f8d72329b2c0))
+
+# [1.0.0-canary.19](https://github.com/algorandfoundation/react-native-passkey-autofill/compare/v1.0.0-canary.18...v1.0.0-canary.19) (2026-06-09)
+
+### Bug Fixes
+
+- **android:** credential repository filter types in getAllCredentials ([2b6523f](https://github.com/algorandfoundation/react-native-passkey-autofill/commit/2b6523fc25aaadb5152b0b0d3d6b3a56e9de1759))
+
+# [1.0.0-canary.18](https://github.com/algorandfoundation/react-native-passkey-autofill/compare/v1.0.0-canary.17...v1.0.0-canary.18) (2026-06-09)
+
+### Features
+
+- PRF extension support for deterministically derived secrets ([4b5b05a](https://github.com/algorandfoundation/react-native-passkey-autofill/commit/4b5b05ab146e39b191855ccb01fd4aca5ed32819))
+
+# [1.0.0-canary.17](https://github.com/algorandfoundation/react-native-passkey-autofill/compare/v1.0.0-canary.16...v1.0.0-canary.17) (2026-05-28)
+
+### Bug Fixes
+
+- allow configurable AAGUID ([d5a8176](https://github.com/algorandfoundation/react-native-passkey-autofill/commit/d5a81765ba150e9873e18875f0ac9f7bc4aede93))
+- **Android:** add NoOp methods for iOS-specific functionality ([e2c64db](https://github.com/algorandfoundation/react-native-passkey-autofill/commit/e2c64db479cda70c7c61b7ab3021b70db949a15b))
+- compile issue ([16b939c](https://github.com/algorandfoundation/react-native-passkey-autofill/commit/16b939cb555e75bd052ce57a41a838810a2770cd))
+
+### Features
+
+- configurable credential requirement ([dc09916](https://github.com/algorandfoundation/react-native-passkey-autofill/commit/dc09916d1ee5c8c9d33e53b57f00171472f4f665))
+- record lastUsedAt/count and fix error handling ([47b40ab](https://github.com/algorandfoundation/react-native-passkey-autofill/commit/47b40abf692c0f7cffee6f2266c66f61f8006a65))
+
+# [1.0.0-canary.16](https://github.com/algorandfoundation/react-native-passkey-autofill/compare/v1.0.0-canary.15...v1.0.0-canary.16) (2026-05-15)
+
+### Bug Fixes
+
+- align ios autofill root key flow ([1287f57](https://github.com/algorandfoundation/react-native-passkey-autofill/commit/1287f57952b41829032ef368bad826624375e9a3))
+
+### Features
+
+- add iOS passkey autofill provider ([9aad8f8](https://github.com/algorandfoundation/react-native-passkey-autofill/commit/9aad8f8ceb2ad54cf53847b60dd6e70d5b2a1f2b))
 
 # [1.0.0-canary.15](https://github.com/algorandfoundation/react-native-passkey-autofill/compare/v1.0.0-canary.14...v1.0.0-canary.15) (2026-04-10)
 
