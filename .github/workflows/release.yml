@@ -1,8 +1,11 @@
 name: Release
 
+# The fork publishes canaries from `main` only. The `release` branch exists solely
+# because semantic-release requires a stable branch; it must never publish.
 on:
   push:
-    branches: [main, release]
+    branches: [main]
+  workflow_dispatch:
 permissions:
   id-token: write
   contents: write
@@ -26,4 +29,7 @@ jobs:
       - name: Release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # npm trusted publishing (OIDC, via `id-token: write`) is preferred; a token is
+          # only used when the NPM_TOKEN secret is set.
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: npx semantic-release
