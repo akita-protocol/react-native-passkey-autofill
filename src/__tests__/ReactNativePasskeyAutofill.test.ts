@@ -91,7 +91,9 @@ describe("ReactNativePasskeyAutofill", () => {
       userName: "alice",
       derivationHandle: "user",
     };
-    await expect(ReactNativePasskeyAutofill.restoreDerivedCredentials([credential])).resolves.toEqual({
+    await expect(
+      ReactNativePasskeyAutofill.restoreDerivedCredentials([credential]),
+    ).resolves.toEqual({
       restored: ["abc"],
       skipped: [],
     });
