@@ -5,22 +5,67 @@ import LocalAuthentication
 import Security
 import UIKit
 
+/// Everything a registration needs, captured once when the request arrives.
+private struct RegistrationRequestSnapshot {
+  let request: ASPasskeyCredentialRequest
+  let identity: ASPasskeyCredentialIdentity
+  let prfInput: PrfInput?
+}
+
+/// Everything an assertion needs, captured once when the request arrives and
+/// never mutated: the credential (metadata only — its key is opened after the
+/// user is verified), its transaction-preview policy, the client data hash the
+/// preview is checked against and the signature covers, and the PRF salts.
+private struct AssertionRequestSnapshot {
+  let credential: StoredPasskeyCredential
+  let clientDataHash: Data
+  let relyingPartyIdentifier: String
+  let prfInput: PrfInput?
+}
+
+private enum CredentialOperationPayload {
+  case registration(RegistrationRequestSnapshot)
+  case assertion(AssertionRequestSnapshot)
+
+  var kind: PendingCredentialOperationKind {
+    switch self {
+    case .registration:
+      return .registration
+    case .assertion(let request):
+      switch request.credential.transactionPreviewPolicy {
+      case .never:
+        return .assertion(requiresPreview: false)
+      case .required:
+        return .assertion(requiresPreview: true)
+      }
+    }
+  }
+}
+
+private struct CredentialOperationResources {
+  var delayedStart: DispatchWorkItem?
+  var authenticationContext: LAContext?
+  var transactionPreviewSession: URLSession?
+  var transactionPreviewTask: URLSessionDataTask?
+  var transactionPreviewAlert: UIAlertController?
+  var identityStoreTask: Task<Void, Never>?
+}
+
+private typealias CredentialOperation = PendingCredentialOperation<
+  CredentialOperationPayload,
+  CredentialOperationResources
+>
+
 final class CredentialProviderViewController: ASCredentialProviderViewController {
   private let store = PasskeyCredentialStore()
-  private var pendingRegistrationRequest: ASPasskeyCredentialRequest?
-  private var pendingRegistrationIdentity: ASPasskeyCredentialIdentity?
-  private var pendingAssertionCredential: StoredPasskeyCredential?
-  private var pendingAssertionClientDataHash: Data?
-  private var pendingAssertionRelyingPartyIdentifier: String?
-  private var pendingAssertionPrfInput: PrfInput?
-  private var pendingRegistrationPrfInput: PrfInput?
-  private var isCompletingRegistration = false
-  private var isCompletingAssertion = false
-  private var isLoadingTransactionPreview = false
+  private var pendingOperation: CredentialOperation?
   private var hasPresentedInterface = false
-  private var authContext: LAContext?
   private let activityIndicator = UIActivityIndicatorView(style: .large)
   private let statusLabel = UILabel()
+
+  deinit {
+    retireCurrentOperation()
+  }
 
   override func viewDidLoad() {
     super.viewDidLoad()
@@ -30,39 +75,43 @@ final class CredentialProviderViewController: ASCredentialProviderViewController
   override func viewDidAppear(_ animated: Bool) {
     super.viewDidAppear(animated)
     hasPresentedInterface = true
+    scheduleStartForCurrentOperation()
+  }
 
-    DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in
-      guard let self else {
-        return
-      }
-      if self.pendingRegistrationRequest != nil {
-        self.authenticateAndCompleteRegistration()
-      } else if self.pendingAssertionCredential != nil {
-        self.prepareTransactionPreviewOrAuthenticate()
-      }
+  override func viewDidDisappear(_ animated: Bool) {
+    super.viewDidDisappear(animated)
+    hasPresentedInterface = false
+    if view.window != nil,
+       let alert = pendingOperation?.resources.transactionPreviewAlert,
+       presentedViewController === alert {
+      return
     }
+    terminateCurrentOperationForLifecycle()
   }
 
   override func prepareCredentialList(
     for serviceIdentifiers: [ASCredentialServiceIdentifier],
     requestParameters: ASPasskeyCredentialRequestParameters
   ) {
+    supersedeCurrentOperation()
+
     guard #available(iOSApplicationExtension 17.0, *) else {
-      cancel(code: .failed, message: "Passkeys require iOS 17 or newer.")
+      cancelRequestWithoutOperation(code: .failed, message: "Passkeys require iOS 17 or newer.")
       return
     }
 
     let relyingPartyIdentifier = requestParameters.relyingPartyIdentifier
     let allowedCredentials = Set(requestParameters.allowedCredentials.map { $0.base64URLEncodedString() })
     guard let credential = store?.credentials(
-            relyingPartyIdentifier: relyingPartyIdentifier
-          ).first(where: { allowedCredentials.isEmpty || allowedCredentials.contains($0.credentialIdData.base64URLEncodedString()) })
-    else {
-      cancel(code: .credentialIdentityNotFound, message: "No passkey is available.")
+      relyingPartyIdentifier: relyingPartyIdentifier
+    ).first(where: {
+      allowedCredentials.isEmpty || allowedCredentials.contains($0.credentialIdData.base64URLEncodedString())
+    }) else {
+      cancelRequestWithoutOperation(code: .credentialIdentityNotFound, message: "No passkey is available.")
       return
     }
 
-    prepareAssertion(
+    beginAssertion(
       credential: credential,
       clientDataHash: requestParameters.clientDataHash,
       relyingPartyIdentifier: relyingPartyIdentifier,
@@ -71,37 +120,50 @@ final class CredentialProviderViewController: ASCredentialProviderViewController
   }
 
   override func provideCredentialWithoutUserInteraction(for credentialRequest: ASCredentialRequest) {
+    supersedeCurrentOperation()
+
     guard #available(iOSApplicationExtension 17.0, *),
           let request = credentialRequest as? ASPasskeyCredentialRequest
     else {
-      cancel(code: .failed, message: "Unsupported credential request.")
+      cancelRequestWithoutOperation(code: .failed, message: "Unsupported credential request.")
       return
     }
 
     guard request.credentialIdentity is ASPasskeyCredentialIdentity else {
-      cancel(code: .credentialIdentityNotFound, message: "Credential identity not found.")
+      cancelRequestWithoutOperation(
+        code: .credentialIdentityNotFound,
+        message: "Credential identity not found."
+      )
       return
     }
 
-    cancel(code: .userInteractionRequired, message: "User verification is required.")
+    cancelRequestWithoutOperation(
+      code: .userInteractionRequired,
+      message: "User verification is required."
+    )
   }
 
   override func prepareInterfaceToProvideCredential(for credentialRequest: ASCredentialRequest) {
+    supersedeCurrentOperation()
+
     guard #available(iOSApplicationExtension 17.0, *),
           let request = credentialRequest as? ASPasskeyCredentialRequest
     else {
-      cancel(code: .failed, message: "Unsupported credential request.")
+      cancelRequestWithoutOperation(code: .failed, message: "Unsupported credential request.")
       return
     }
 
     guard let identity = request.credentialIdentity as? ASPasskeyCredentialIdentity,
           let credential = store?.credential(id: identity.credentialID)
     else {
-      cancel(code: .credentialIdentityNotFound, message: "Credential identity not found.")
+      cancelRequestWithoutOperation(
+        code: .credentialIdentityNotFound,
+        message: "Credential identity not found."
+      )
       return
     }
 
-    prepareAssertion(
+    beginAssertion(
       credential: credential,
       clientDataHash: request.clientDataHash,
       relyingPartyIdentifier: identity.relyingPartyIdentifier,
@@ -110,55 +172,411 @@ final class CredentialProviderViewController: ASCredentialProviderViewController
   }
 
   override func prepareInterface(forPasskeyRegistration request: ASCredentialRequest) {
+    supersedeCurrentOperation()
     store?.appendDiagnostic("prepareInterface(forPasskeyRegistration)")
+
     guard #available(iOSApplicationExtension 17.0, *),
           let request = request as? ASPasskeyCredentialRequest,
           let identity = request.credentialIdentity as? ASPasskeyCredentialIdentity
     else {
-      cancel(code: .failed, message: "Unsupported passkey registration request.")
+      cancelRequestWithoutOperation(
+        code: .failed,
+        message: "Unsupported passkey registration request."
+      )
       return
     }
 
-    pendingRegistrationRequest = request
-    pendingRegistrationIdentity = identity
-    pendingRegistrationPrfInput = Self.prfInput(fromRegistration: request)
-    showCheckingPasskeys()
+    beginOperation(
+      payload: .registration(
+        RegistrationRequestSnapshot(
+          request: request,
+          identity: identity,
+          prfInput: Self.prfInput(fromRegistration: request)
+        )
+      )
+    )
+  }
 
-    if hasPresentedInterface {
-      DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in
-        self?.authenticateAndCompleteRegistration()
+  override func prepareInterfaceForExtensionConfiguration() {
+    supersedeCurrentOperation()
+    extensionContext.completeExtensionConfigurationRequest()
+  }
+
+  private func beginAssertion(
+    credential: StoredPasskeyCredential,
+    clientDataHash: Data,
+    relyingPartyIdentifier: String,
+    prfInput: PrfInput?
+  ) {
+    let request = AssertionRequestSnapshot(
+      credential: credential,
+      clientDataHash: clientDataHash,
+      relyingPartyIdentifier: relyingPartyIdentifier,
+      prfInput: prfInput
+    )
+    beginOperation(payload: .assertion(request))
+  }
+
+  private func beginOperation(payload: CredentialOperationPayload) {
+    retireCurrentOperation()
+    pendingOperation = CredentialOperation(
+      kind: payload.kind,
+      payload: payload,
+      resources: CredentialOperationResources()
+    )
+    showCheckingPasskeys()
+    scheduleStartForCurrentOperation()
+  }
+
+  private func scheduleStartForCurrentOperation() {
+    guard hasPresentedInterface,
+          let operation = pendingOperation,
+          operation.phase == .waiting,
+          operation.resources.delayedStart == nil
+    else {
+      return
+    }
+
+    let operationID = operation.id
+    let workItem = DispatchWorkItem { [weak self] in
+      self?.startWaitingOperation(operationID: operationID)
+    }
+    guard updateOperationResources(
+      operationID: operationID,
+      phase: .waiting,
+      { $0.delayedStart = workItem }
+    ) else {
+      workItem.cancel()
+      return
+    }
+
+    DispatchQueue.main.asyncAfter(deadline: .now() + 0.25, execute: workItem)
+  }
+
+  private func startWaitingOperation(operationID: UUID) {
+    guard let payload = payload(operationID: operationID, phase: .waiting) else {
+      return
+    }
+
+    switch payload {
+    case .registration:
+      authenticate(operationID: operationID, from: .waiting)
+    case .assertion(let request):
+      switch request.credential.transactionPreviewPolicy {
+      case .never:
+        authenticate(operationID: operationID, from: .waiting)
+      case .required(let httpsEndpoint, let token):
+        fetchRequiredTransactionPreview(
+          request,
+          operationID: operationID,
+          httpsEndpoint: httpsEndpoint,
+          token: token
+        )
       }
     }
   }
 
-  override func prepareInterfaceForExtensionConfiguration() {
-    extensionContext.completeExtensionConfigurationRequest()
-  }
-
-  private func completePendingRegistration() {
-    store?.appendDiagnostic("completePendingRegistration")
-    showCheckingPasskeys()
-
-    guard #available(iOSApplicationExtension 17.0, *),
-          let request = pendingRegistrationRequest,
-          let identity = pendingRegistrationIdentity
+  private func fetchRequiredTransactionPreview(
+    _ assertionRequest: AssertionRequestSnapshot,
+    operationID: UUID,
+    httpsEndpoint: URL,
+    token: String
+  ) {
+    guard transitionOperation(
+      operationID: operationID,
+      from: .waiting,
+      to: .loadingPreview
+    ) else {
+      return
+    }
+    guard let encodedCredentialId = assertionRequest.credential.credentialIdData
+      .base64URLEncodedString()
+      .addingPercentEncoding(withAllowedCharacters: .akitaURLPathComponent),
+      let endpoint = URL(
+        string: "/akita/passkey-previews/\(encodedCredentialId)",
+        relativeTo: httpsEndpoint
+      )?.absoluteURL
     else {
-      cancel(code: .failed, message: "Unsupported passkey registration request.")
+      cancelOperation(
+        operationID: operationID,
+        code: .failed,
+        message: "The required transaction preview endpoint is invalid."
+      )
       return
     }
 
+    showCheckingPasskeys()
+    var previewRequest = URLRequest(url: endpoint)
+    previewRequest.httpMethod = "GET"
+    previewRequest.timeoutInterval = 15
+    previewRequest.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+    previewRequest.setValue("application/json", forHTTPHeaderField: "Accept")
+
+    let configuration = URLSessionConfiguration.ephemeral
+    configuration.httpShouldSetCookies = false
+    configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
+    configuration.urlCache = nil
+    let session = URLSession(
+      configuration: configuration,
+      delegate: RejectingRedirectSessionDelegate(),
+      delegateQueue: nil
+    )
+    let task = session.dataTask(with: previewRequest) { [weak self] data, response, error in
+      DispatchQueue.main.async {
+        guard let self,
+              self.isCurrentOperation(
+                operationID: operationID,
+                phase: .loadingPreview
+              )
+        else {
+          return
+        }
+
+        do {
+          if let error {
+            throw error
+          }
+          guard let http = response as? HTTPURLResponse,
+                (200..<300).contains(http.statusCode),
+                let data
+          else {
+            throw TransactionPreviewError.unavailable
+          }
+          let envelope = try JSONDecoder().decode(TransactionPreviewEnvelope.self, from: data)
+          try self.validateTransactionPreview(envelope.data, request: assertionRequest)
+          self.presentTransactionPreview(
+            envelope.data,
+            request: assertionRequest,
+            operationID: operationID
+          )
+        } catch {
+          self.cancelOperation(
+            operationID: operationID,
+            code: .failed,
+            message: "The required transaction preview could not be verified: \(error.localizedDescription)"
+          )
+        }
+      }
+    }
+    guard updateOperationResources(
+      operationID: operationID,
+      phase: .loadingPreview,
+      {
+        $0.transactionPreviewSession = session
+        $0.transactionPreviewTask = task
+      }
+    ) else {
+      task.cancel()
+      session.invalidateAndCancel()
+      return
+    }
+    task.resume()
+  }
+
+  private func validateTransactionPreview(
+    _ preview: TransactionPreview,
+    request: AssertionRequestSnapshot
+  ) throws {
+    guard preview.credentialId == request.credential.credentialIdData.base64URLEncodedString(),
+          preview.expiresAt >= UInt64(Date().timeIntervalSince1970),
+          preview.transactions.count > 0,
+          preview.transactions.count <= 16
+    else {
+      throw TransactionPreviewError.invalid
+    }
+
+    let escapedChallenge = try Self.jsonEscaped(preview.challenge)
+    let escapedOrigin = try Self.jsonEscaped(preview.origin)
+    let candidates = [
+      "{\"type\":\"webauthn.get\",\"challenge\":\(escapedChallenge),\"origin\":\(escapedOrigin),\"crossOrigin\":false}",
+      "{\"type\":\"webauthn.get\",\"challenge\":\(escapedChallenge),\"origin\":\(escapedOrigin)}",
+    ]
+    guard candidates.contains(where: {
+      Data(SHA256.hash(data: Data($0.utf8))) == request.clientDataHash
+    }) else {
+      throw TransactionPreviewError.challengeMismatch
+    }
+  }
+
+  private func presentTransactionPreview(
+    _ preview: TransactionPreview,
+    request: AssertionRequestSnapshot,
+    operationID: UUID
+  ) {
+    guard transitionOperation(
+      operationID: operationID,
+      from: .loadingPreview,
+      to: .presentingPreview
+    ) else {
+      return
+    }
+
+    let lines = preview.transactions.enumerated().map { index, transaction in
+      var detail = "\(index + 1). \(transaction.displayType)"
+      detail += " from \(transaction.sender.abbreviatedAddress)"
+      if let receiver = transaction.receiver, !receiver.isEmpty {
+        detail += " to \(receiver.abbreviatedAddress)"
+      }
+      if let amount = transaction.amount, amount > 0 {
+        detail += " · \(amount)"
+      }
+      if let appId = transaction.appId, appId > 0 {
+        detail += " · app \(appId)"
+      }
+      if let assetId = transaction.assetId, assetId > 0 {
+        detail += " · asset \(assetId)"
+      }
+      if let method = transaction.method, !method.isEmpty {
+        detail += " · method \(method)"
+      }
+      detail += " · fee \(transaction.fee) µALGO"
+      return detail
+    }
+    let alert = UIAlertController(
+      title: "Approve transaction group?",
+      message: lines.joined(separator: "\n"),
+      preferredStyle: .alert
+    )
+    alert.addAction(UIAlertAction(title: "Cancel", style: .cancel) { [weak self] _ in
+      guard let self,
+            self.isCurrentOperation(
+              operationID: operationID,
+              phase: .presentingPreview
+            )
+      else {
+        return
+      }
+      self.cancelOperation(
+        operationID: operationID,
+        code: .userCanceled,
+        message: "Transaction approval was canceled."
+      )
+    })
+    alert.addAction(UIAlertAction(title: "Continue", style: .default) { [weak self] _ in
+      guard let self else {
+        return
+      }
+      self.authenticate(operationID: operationID, from: .presentingPreview)
+    })
+    guard updateOperationResources(
+      operationID: operationID,
+      phase: .presentingPreview,
+      { $0.transactionPreviewAlert = alert }
+    ) else {
+      alert.dismiss(animated: false)
+      return
+    }
+    present(alert, animated: true)
+  }
+
+  private func authenticate(
+    operationID: UUID,
+    from expectedPhase: PendingCredentialOperationPhase
+  ) {
+    guard transitionOperation(
+      operationID: operationID,
+      from: expectedPhase,
+      to: .authenticating
+    ), let payload = payload(operationID: operationID, phase: .authenticating) else {
+      return
+    }
+
+    let context = LAContext()
+    context.localizedCancelTitle = "Cancel"
+    context.localizedFallbackTitle = ""
+    guard updateOperationResources(
+      operationID: operationID,
+      phase: .authenticating,
+      { $0.authenticationContext = context }
+    ) else {
+      context.invalidate()
+      return
+    }
+
+    let policy: LAPolicy = BiometricRequirement.current.laPolicy
+    var error: NSError?
+    guard context.canEvaluatePolicy(policy, error: &error) else {
+      cancelOperation(
+        operationID: operationID,
+        code: .failed,
+        message: error?.localizedDescription ?? "Device authentication is not available."
+      )
+      return
+    }
+
+    let reason: String
+    switch payload {
+    case .registration:
+      reason = "Create passkeys with Akita"
+      store?.appendDiagnostic("evaluatePolicy registration start")
+    case .assertion:
+      reason = "Use passkeys with Akita"
+      store?.appendDiagnostic("evaluatePolicy assertion start")
+    }
+
+    context.evaluatePolicy(policy, localizedReason: reason) { [weak self] success, authenticationError in
+      DispatchQueue.main.async {
+        guard let self,
+              self.isCurrentOperation(
+                operationID: operationID,
+                phase: .authenticating
+              )
+        else {
+          return
+        }
+
+        if success {
+          switch payload {
+          case .registration(let request):
+            self.store?.appendDiagnostic("evaluatePolicy registration success")
+            self.completeRegistration(request, operationID: operationID)
+          case .assertion(let request):
+            self.store?.appendDiagnostic("evaluatePolicy assertion success")
+            self.completeAssertion(request, operationID: operationID)
+          }
+        } else {
+          self.store?.appendDiagnostic(
+            "evaluatePolicy failed: \(authenticationError?.localizedDescription ?? "unknown")"
+          )
+          self.cancelOperation(
+            operationID: operationID,
+            code: .userCanceled,
+            message: authenticationError?.localizedDescription ?? "Device authentication was canceled."
+          )
+        }
+      }
+    }
+  }
+
+  private func completeRegistration(
+    _ snapshot: RegistrationRequestSnapshot,
+    operationID: UUID
+  ) {
+    guard transitionOperation(
+      operationID: operationID,
+      from: .authenticating,
+      to: .completing
+    ) else {
+      return
+    }
+    store?.appendDiagnostic("completeRegistration")
+
     do {
       guard let store else {
-        self.store?.appendDiagnostic("missing wallet root-key state")
-        showFailure("Wallet root key is not available. Open Akita once, unlock it, then try again.")
+        cancelOperation(
+          operationID: operationID,
+          code: .failed,
+          message: "Wallet root key is not available. Open Akita once, unlock it, then try again."
+        )
         return
       }
 
       // No requested scheme: a new credential takes the preferred parent (the
-      // wallet's deterministic-P256 main key) and records which one it got, so
-      // every later assertion re-derives the same key.
+      // wallet's HD root when Akita shared one, otherwise the deterministic-P256
+      // main key) and records which one it got, so every later assertion
+      // re-derives against the same root.
       let parent = try store.parentSecret()
-      let parentKeyId = parent.keyId
+      let identity = snapshot.identity
       let userHandle = identity.userHandleString
       let privateKey: P256.Signing.PrivateKey
       if parent.scheme == PasskeyKeystoreRecords.schemeAkitaHdRoot {
@@ -187,22 +605,21 @@ final class CredentialProviderViewController: ASCredentialProviderViewController
         publicKey: publicKey.base64EncodedString(),
         createdAt: Date().timeIntervalSince1970,
         lastUsedAt: nil,
-        parentKeyId: parentKeyId,
+        parentKeyId: parent.keyId,
         derivationScheme: parent.scheme
       )
 
-      let authData = try WebAuthn.authenticatorDataForAttestation(
+      let authenticatorData = try WebAuthn.authenticatorDataForAttestation(
         relyingPartyIdentifier: identity.relyingPartyIdentifier,
         credentialId: credentialId,
         publicKey: publicKey
       )
       let registrationCredential = ASPasskeyRegistrationCredential(
         relyingParty: identity.relyingPartyIdentifier,
-        clientDataHash: request.clientDataHash,
+        clientDataHash: snapshot.request.clientDataHash,
         credentialID: credentialId,
-        attestationObject: WebAuthn.attestationObject(authenticatorData: authData)
+        attestationObject: WebAuthn.attestationObject(authenticatorData: authenticatorData)
       )
-
       attachPrfRegistrationOutput(
         to: registrationCredential,
         derivedParentSecret: parent.bytes,
@@ -213,300 +630,270 @@ final class CredentialProviderViewController: ASCredentialProviderViewController
       try store.save(storedCredential)
       store.appendDiagnostic("stored passkey credential")
 
-      Task {
+      let identityStoreTask = Task { @MainActor [weak self, store] in
+        guard !Task.isCancelled else {
+          return
+        }
         do {
           try await store.replaceIdentityStore()
+          guard !Task.isCancelled,
+                let self,
+                self.isCurrentOperation(
+                  operationID: operationID,
+                  phase: .completing
+                )
+          else {
+            return
+          }
           store.appendDiagnostic("replaceIdentityStore after registration succeeded")
         } catch {
-          store.appendDiagnostic("replaceIdentityStore after registration failed: \(error.localizedDescription)")
+          guard !Task.isCancelled,
+                let self,
+                self.isCurrentOperation(
+                  operationID: operationID,
+                  phase: .completing
+                )
+          else {
+            return
+          }
+          store.appendDiagnostic(
+            "replaceIdentityStore after registration failed; continuing with saved credential: \(error.localizedDescription)"
+          )
         }
       }
-
-      store.appendDiagnostic("completeRegistrationRequest")
-      extensionContext.completeRegistrationRequest(using: registrationCredential) { [weak self] completed in
-        self?.store?.appendDiagnostic("completeRegistrationRequest completion: \(completed)")
-        self?.authContext = nil
+      guard updateOperationResources(
+        operationID: operationID,
+        phase: .completing,
+        { $0.identityStoreTask = identityStoreTask }
+      ) else {
+        identityStoreTask.cancel()
+        return
       }
+      submitRegistrationToApple(
+        registrationCredential,
+        snapshot: snapshot,
+        operationID: operationID
+      )
     } catch {
-      store?.appendDiagnostic("registration error: \(error.localizedDescription)")
-      showFailure(error.localizedDescription)
+      cancelOperation(
+        operationID: operationID,
+        code: .failed,
+        message: error.localizedDescription
+      )
+    }
+  }
+
+  private func submitRegistrationToApple(
+    _ credential: ASPasskeyRegistrationCredential,
+    snapshot: RegistrationRequestSnapshot,
+    operationID: UUID
+  ) {
+    guard isCurrentOperation(operationID: operationID, phase: .completing) else {
+      return
+    }
+    store?.appendDiagnostic("completeRegistrationRequest")
+    extensionContext.completeRegistrationRequest(using: credential) { [weak self, snapshot, credential] completed in
+      DispatchQueue.main.async {
+        _ = (snapshot, credential)
+        guard let self,
+              self.isCurrentOperation(
+                operationID: operationID,
+                phase: .completing
+              )
+        else {
+          return
+        }
+        self.store?.appendDiagnostic("completeRegistrationRequest completion: \(completed)")
+        self.finishSuccessfulOperation(operationID: operationID)
+      }
     }
   }
 
   private func completeAssertion(
-    credential: StoredPasskeyCredential,
-    clientDataHash: Data,
-    relyingPartyIdentifier: String
+    _ request: AssertionRequestSnapshot,
+    operationID: UUID
   ) {
-    // `credential` was selected from the metadata-only list. Its private key is
-    // opened here, after `evaluatePolicy` succeeded, for this one record only.
-    // Only sign if the key's record still carries the preview policy this
-    // assertion was gated on.
-    guard let signingCredential = store?.signingCredential(id: credential.credentialIdData),
-          signingCredential.transactionPreviewPolicy == credential.transactionPreviewPolicy
-    else {
-      isCompletingAssertion = false
-      cancel(code: .credentialIdentityNotFound, message: "Credential not found.")
+    guard transitionOperation(
+      operationID: operationID,
+      from: .authenticating,
+      to: .completing
+    ) else {
       return
     }
+
+    // The snapshot's credential was selected from the metadata-only list. Its
+    // private key is opened here, after the user was verified, for this one
+    // record only — and only if it still carries the very preview policy the
+    // snapshot was gated on.
+    guard let signingCredential = store?.signingCredential(id: request.credential.credentialIdData),
+          signingCredential.transactionPreviewPolicy == request.credential.transactionPreviewPolicy
+    else {
+      cancelOperation(
+        operationID: operationID,
+        code: .credentialIdentityNotFound,
+        message: "Credential not found."
+      )
+      return
+    }
+
     do {
       let authenticatorData = WebAuthn.authenticatorDataForAssertion(
-        relyingPartyIdentifier: relyingPartyIdentifier
+        relyingPartyIdentifier: request.relyingPartyIdentifier
       )
-      let signature = try signingCredential.sign(authenticatorData + clientDataHash)
+      let signature = try signingCredential.sign(authenticatorData + request.clientDataHash)
       let assertionCredential = ASPasskeyAssertionCredential(
-        userHandle: credential.userHandleData,
-        relyingParty: relyingPartyIdentifier,
+        userHandle: request.credential.userHandleData,
+        relyingParty: request.relyingPartyIdentifier,
         signature: signature,
-        clientDataHash: clientDataHash,
+        clientDataHash: request.clientDataHash,
         authenticatorData: authenticatorData,
-        credentialID: credential.credentialIdData
+        credentialID: request.credential.credentialIdData
       )
       attachPrfAssertionOutput(
         to: assertionCredential,
-        credential: credential,
-        relyingPartyIdentifier: relyingPartyIdentifier
+        credential: request.credential,
+        relyingPartyIdentifier: request.relyingPartyIdentifier,
+        prfInput: request.prfInput
       )
-      extensionContext.completeAssertionRequest(using: assertionCredential) { [weak self] _ in
-        self?.store?.recordCredentialUsage(id: credential.credentialId)
-        self?.authContext = nil
-        self?.isCompletingAssertion = false
-        self?.pendingAssertionCredential = nil
-        self?.pendingAssertionClientDataHash = nil
-        self?.pendingAssertionRelyingPartyIdentifier = nil
-        self?.pendingAssertionPrfInput = nil
+
+      extensionContext.completeAssertionRequest(using: assertionCredential) { [weak self, request, assertionCredential] completed in
+        DispatchQueue.main.async {
+          _ = (request, assertionCredential)
+          guard let self,
+                self.isCurrentOperation(
+                  operationID: operationID,
+                  phase: .completing
+                )
+          else {
+            return
+          }
+          self.store?.appendDiagnostic("completeAssertionRequest completion: \(completed)")
+          self.store?.recordCredentialUsage(id: request.credential.credentialId)
+          self.finishSuccessfulOperation(operationID: operationID)
+        }
       }
     } catch {
-      isCompletingAssertion = false
-      cancel(code: .failed, message: error.localizedDescription)
+      cancelOperation(
+        operationID: operationID,
+        code: .failed,
+        message: error.localizedDescription
+      )
     }
   }
 
-  private func prepareAssertion(
-    credential: StoredPasskeyCredential,
-    clientDataHash: Data,
-    relyingPartyIdentifier: String,
-    prfInput: PrfInput?
+  private func transitionOperation(
+    operationID: UUID,
+    from expectedPhase: PendingCredentialOperationPhase,
+    to nextPhase: PendingCredentialOperationPhase
+  ) -> Bool {
+    pendingOperation?.transition(
+      operationID: operationID,
+      from: expectedPhase,
+      to: nextPhase
+    ) == true
+  }
+
+  private func updateOperationResources(
+    operationID: UUID,
+    phase expectedPhase: PendingCredentialOperationPhase? = nil,
+    _ update: (inout CredentialOperationResources) -> Void
+  ) -> Bool {
+    guard pendingOperation?.id == operationID,
+          expectedPhase.map({ pendingOperation?.phase == $0 }) ?? true,
+          pendingOperation?.phase != .terminal
+    else {
+      return false
+    }
+    update(&pendingOperation!.resources)
+    return true
+  }
+
+  private func isCurrentOperation(
+    operationID: UUID,
+    phase expectedPhase: PendingCredentialOperationPhase? = nil
+  ) -> Bool {
+    guard pendingOperation?.id == operationID else {
+      return false
+    }
+    return expectedPhase.map { pendingOperation?.phase == $0 } ?? true
+  }
+
+  @discardableResult
+  private func retireOperation(operationID: UUID) -> Bool {
+    guard var operation = pendingOperation,
+          operation.terminate(operationID: operationID)
+    else {
+      return false
+    }
+    pendingOperation = nil
+    Self.cleanupResources(operation.resources)
+    return true
+  }
+
+  @discardableResult
+  private func retireCurrentOperation() -> Bool {
+    guard let operationID = pendingOperation?.id else {
+      return false
+    }
+    return retireOperation(operationID: operationID)
+  }
+
+  private func payload(
+    operationID: UUID,
+    phase expectedPhase: PendingCredentialOperationPhase
+  ) -> CredentialOperationPayload? {
+    guard isCurrentOperation(
+      operationID: operationID,
+      phase: expectedPhase
+    ) else {
+      return nil
+    }
+    return pendingOperation?.payload
+  }
+
+  private func finishSuccessfulOperation(operationID: UUID) {
+    retireOperation(operationID: operationID)
+  }
+
+  private func cancelOperation(
+    operationID: UUID,
+    code: ASExtensionError.Code,
+    message: String
   ) {
-    pendingAssertionCredential = credential
-    pendingAssertionClientDataHash = clientDataHash
-    pendingAssertionRelyingPartyIdentifier = relyingPartyIdentifier
-    pendingAssertionPrfInput = prfInput
-    showCheckingPasskeys()
-
-    if hasPresentedInterface {
-      DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in
-        self?.prepareTransactionPreviewOrAuthenticate()
-      }
+    guard retireOperation(operationID: operationID) else {
+      return
     }
+    cancelExtensionRequest(code: code, message: message)
   }
 
-  private func prepareTransactionPreviewOrAuthenticate() {
-    guard !isLoadingTransactionPreview, !isCompletingAssertion else {
-      return
-    }
-    guard let credential = pendingAssertionCredential else {
-      authenticateAndCompleteAssertion()
-      return
-    }
-    // Closed policy: `.never` authenticates directly; `.required` always carries
-    // a validated HTTPS origin and token, so there is no partial state to skip.
-    let baseURL: URL
-    let token: String
-    switch credential.transactionPreviewPolicy {
-    case .never:
-      authenticateAndCompleteAssertion()
-      return
-    case .required(let httpsEndpoint, let previewToken):
-      baseURL = httpsEndpoint
-      token = previewToken
-    }
-    guard let encodedCredentialId = credential.credentialIdData.base64URLEncodedString()
-            .addingPercentEncoding(withAllowedCharacters: .akitaURLPathComponent),
-          let endpoint = URL(
-            string: "/akita/passkey-previews/\(encodedCredentialId)",
-            relativeTo: baseURL
-          )?.absoluteURL
-    else {
-      cancel(code: .failed, message: "Transaction preview is required but is not configured.")
-      return
-    }
-
-    isLoadingTransactionPreview = true
-    showCheckingPasskeys()
-    var request = URLRequest(url: endpoint)
-    request.httpMethod = "GET"
-    request.timeoutInterval = 15
-    request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-    request.setValue("application/json", forHTTPHeaderField: "Accept")
-
-    // Ephemeral, cache- and cookie-free, and redirects are refused: the bearer
-    // token only ever goes to the configured origin.
-    let configuration = URLSessionConfiguration.ephemeral
-    configuration.httpShouldSetCookies = false
-    configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
-    configuration.urlCache = nil
-    let session = URLSession(
-      configuration: configuration,
-      delegate: RejectingRedirectSessionDelegate(),
-      delegateQueue: nil
-    )
-    session.dataTask(with: request) { [weak self] data, response, error in
-      session.finishTasksAndInvalidate()
-      DispatchQueue.main.async {
-        guard let self else { return }
-        self.isLoadingTransactionPreview = false
-        do {
-          if let error { throw error }
-          guard let http = response as? HTTPURLResponse,
-                (200..<300).contains(http.statusCode),
-                let data
-          else {
-            throw TransactionPreviewError.unavailable
-          }
-          let envelope = try JSONDecoder().decode(TransactionPreviewEnvelope.self, from: data)
-          try self.validateTransactionPreview(envelope.data, credential: credential)
-          self.presentTransactionPreview(envelope.data)
-        } catch {
-          self.cancel(
-            code: .failed,
-            message: "The required transaction preview could not be verified: \(error.localizedDescription)"
-          )
-        }
-      }
-    }.resume()
+  private func supersedeCurrentOperation() {
+    retireCurrentOperation()
   }
 
-  private func validateTransactionPreview(
-    _ preview: TransactionPreview,
-    credential: StoredPasskeyCredential
-  ) throws {
-    guard preview.credentialId == credential.credentialIdData.base64URLEncodedString(),
-          preview.expiresAt >= UInt64(Date().timeIntervalSince1970),
-          preview.transactions.count > 0,
-          preview.transactions.count <= 16,
-          let expectedHash = pendingAssertionClientDataHash
-    else {
-      throw TransactionPreviewError.invalid
-    }
-
-    let escapedChallenge = try Self.jsonEscaped(preview.challenge)
-    let escapedOrigin = try Self.jsonEscaped(preview.origin)
-    let candidates = [
-      "{\"type\":\"webauthn.get\",\"challenge\":\(escapedChallenge),\"origin\":\(escapedOrigin),\"crossOrigin\":false}",
-      "{\"type\":\"webauthn.get\",\"challenge\":\(escapedChallenge),\"origin\":\(escapedOrigin)}",
-    ]
-    guard candidates.contains(where: {
-      Data(SHA256.hash(data: Data($0.utf8))) == expectedHash
-    }) else {
-      throw TransactionPreviewError.challengeMismatch
-    }
+  private func terminateCurrentOperationForLifecycle() {
+    retireCurrentOperation()
   }
 
-  private func presentTransactionPreview(_ preview: TransactionPreview) {
-    let lines = preview.transactions.enumerated().map { index, transaction in
-      var detail = "\(index + 1). \(transaction.displayType)"
-      detail += " from \(transaction.sender.abbreviatedAddress)"
-      if let receiver = transaction.receiver, !receiver.isEmpty {
-        detail += " to \(receiver.abbreviatedAddress)"
-      }
-      if let amount = transaction.amount, amount > 0 {
-        detail += " · \(amount)"
-      }
-      if let appId = transaction.appId, appId > 0 {
-        detail += " · app \(appId)"
-      }
-      if let assetId = transaction.assetId, assetId > 0 {
-        detail += " · asset \(assetId)"
-      }
-      if let method = transaction.method, !method.isEmpty {
-        detail += " · method \(method)"
-      }
-      detail += " · fee \(transaction.fee) µALGO"
-      return detail
-    }
-    let alert = UIAlertController(
-      title: "Approve transaction group?",
-      message: lines.joined(separator: "\n"),
-      preferredStyle: .alert
-    )
-    alert.addAction(UIAlertAction(title: "Cancel", style: .cancel) { [weak self] _ in
-      self?.cancel(code: .userCanceled, message: "Transaction approval was canceled.")
-    })
-    alert.addAction(UIAlertAction(title: "Continue", style: .default) { [weak self] _ in
-      self?.authenticateAndCompleteAssertion()
-    })
-    present(alert, animated: true)
+  private static func cleanupResources(_ resources: CredentialOperationResources) {
+    resources.delayedStart?.cancel()
+    resources.transactionPreviewTask?.cancel()
+    resources.transactionPreviewSession?.invalidateAndCancel()
+    resources.transactionPreviewAlert?.dismiss(animated: false)
+    resources.authenticationContext?.invalidate()
+    resources.identityStoreTask?.cancel()
   }
 
-  private static func jsonEscaped(_ value: String) throws -> String {
-    let data = try JSONSerialization.data(withJSONObject: [value], options: [])
-    guard let encoded = String(data: data, encoding: .utf8) else {
-      throw TransactionPreviewError.invalid
-    }
-    return String(encoded.dropFirst().dropLast())
+  private func cancelRequestWithoutOperation(
+    code: ASExtensionError.Code,
+    message: String
+  ) {
+    cancelExtensionRequest(code: code, message: message)
   }
 
-  private func authenticateAndCompleteAssertion() {
-    guard !isCompletingAssertion else {
-      return
-    }
-    isCompletingAssertion = true
-
-    guard let credential = pendingAssertionCredential,
-          let clientDataHash = pendingAssertionClientDataHash,
-          let relyingPartyIdentifier = pendingAssertionRelyingPartyIdentifier
-    else {
-      isCompletingAssertion = false
-      cancel(code: .credentialIdentityNotFound, message: "Credential identity not found.")
-      return
-    }
-
-    let context = LAContext()
-    authContext = context
-    context.localizedCancelTitle = "Cancel"
-    context.localizedFallbackTitle = ""
-
-    let policy: LAPolicy = BiometricRequirement.current.laPolicy
-
-    var error: NSError?
-    guard context.canEvaluatePolicy(policy, error: &error) else {
-      authContext = nil
-      isCompletingAssertion = false
-      showFailure(error?.localizedDescription ?? "Device authentication is not available.")
-      return
-    }
-
-    store?.appendDiagnostic("evaluatePolicy assertion start")
-    context.evaluatePolicy(policy, localizedReason: "Use passkeys with Akita") { [weak self] success, authenticationError in
-      DispatchQueue.main.async {
-        guard let self else {
-          return
-        }
-
-        if success {
-          self.store?.appendDiagnostic("evaluatePolicy assertion success")
-          self.completeAssertion(
-            credential: credential,
-            clientDataHash: clientDataHash,
-            relyingPartyIdentifier: relyingPartyIdentifier
-          )
-        } else {
-          self.authContext = nil
-          self.isCompletingAssertion = false
-          self.store?.appendDiagnostic(
-            "evaluatePolicy assertion failed: \(authenticationError?.localizedDescription ?? "unknown")"
-          )
-          self.cancel(
-            code: .userCanceled,
-            message: authenticationError?.localizedDescription ?? "Biometric authentication was canceled."
-          )
-        }
-      }
-    }
-  }
-
-  private func cancel(code: ASExtensionError.Code, message: String) {
+  private func cancelExtensionRequest(
+    code: ASExtensionError.Code,
+    message: String
+  ) {
     store?.appendDiagnostic("cancel: \(message)")
     extensionContext.cancelRequest(
       withError: NSError(
@@ -549,54 +936,12 @@ final class CredentialProviderViewController: ASCredentialProviderViewController
     statusLabel.text = "checking passkeys..."
   }
 
-  private func showFailure(_ message: String) {
-    store?.appendDiagnostic("showFailure: \(message)")
-    activityIndicator.stopAnimating()
-    statusLabel.text = message
-  }
-
-  private func authenticateAndCompleteRegistration() {
-    guard !isCompletingRegistration else {
-      return
+  private static func jsonEscaped(_ value: String) throws -> String {
+    let data = try JSONSerialization.data(withJSONObject: [value], options: [])
+    guard let encoded = String(data: data, encoding: .utf8) else {
+      throw TransactionPreviewError.invalid
     }
-    isCompletingRegistration = true
-
-    let context = LAContext()
-    authContext = context
-    context.localizedCancelTitle = "Cancel"
-    context.localizedFallbackTitle = ""
-
-    let policy: LAPolicy = BiometricRequirement.current.laPolicy
-
-    var error: NSError?
-    guard context.canEvaluatePolicy(policy, error: &error) else {
-      authContext = nil
-      showFailure(error?.localizedDescription ?? "Device authentication is not available.")
-      return
-    }
-
-    store?.appendDiagnostic("evaluatePolicy start")
-    context.evaluatePolicy(policy, localizedReason: "Create passkeys with Akita") { [weak self] success, authenticationError in
-      DispatchQueue.main.async {
-        guard let self else {
-          return
-        }
-
-        if success {
-          self.store?.appendDiagnostic("evaluatePolicy success")
-          self.completePendingRegistration()
-        } else {
-          self.authContext = nil
-          self.store?.appendDiagnostic(
-            "evaluatePolicy failed: \(authenticationError?.localizedDescription ?? "unknown")"
-          )
-          self.cancel(
-            code: .userCanceled,
-            message: authenticationError?.localizedDescription ?? "Biometric authentication was canceled."
-          )
-        }
-      }
-    }
+    return String(encoded.dropFirst().dropLast())
   }
 
   private static func domainSpecificKeyPair(
@@ -764,10 +1109,11 @@ extension CredentialProviderViewController {
   func attachPrfAssertionOutput(
     to assertionCredential: ASPasskeyAssertionCredential,
     credential: StoredPasskeyCredential,
-    relyingPartyIdentifier: String
+    relyingPartyIdentifier: String,
+    prfInput: PrfInput?
   ) {
     guard #available(iOSApplicationExtension 18.0, *),
-          let input = pendingAssertionPrfInput else { return }
+          let input = prfInput else { return }
 
     do {
       guard let store else { return }

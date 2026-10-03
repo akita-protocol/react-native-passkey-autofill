@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Compiles and runs the host-side Swift harnesses for the iOS AutoFill provider:
 # the closed transaction-preview policy (persistence, migration, alias
-# quarantine), plus source-level invariants of CredentialProviderViewController.swift. Needs Xcode; no device.
+# quarantine) and the single pending-operation state machine, plus source-level
+# invariants of CredentialProviderViewController.swift. Needs Xcode; no device.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -18,3 +19,11 @@ xcrun swiftc \
 "${HARNESS_DIR}/passkey-preview-policy-harness" \
   "${PROVIDER_DIR}/CredentialProviderViewController.swift"
 
+xcrun swiftc \
+  "${PROVIDER_DIR}/PendingCredentialOperation.swift" \
+  "${SCRIPT_DIR}/passkey-pending-operation-harness.swift" \
+  -o "${HARNESS_DIR}/passkey-pending-operation-harness"
+
+"${HARNESS_DIR}/passkey-pending-operation-harness" \
+  "${PROVIDER_DIR}/CredentialProviderViewController.swift" \
+  "${PROJECT_DIR}/app.plugin.js"

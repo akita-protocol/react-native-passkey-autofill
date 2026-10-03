@@ -365,17 +365,27 @@ struct PasskeyPreviewPolicyHarness {
   private static func assertControllerSecurityInvariants(sourcePath: String) throws {
     let source = try String(contentsOfFile: sourcePath, encoding: .utf8)
     for requiredFragment in [
+      "private struct AssertionRequestSnapshot",
+      "private var pendingOperation",
       "RejectingRedirectSessionDelegate()",
       "completionHandler(nil)",
-      "switch credential.transactionPreviewPolicy",
-      "signingCredential.transactionPreviewPolicy == credential.transactionPreviewPolicy",
+      "phase: .loadingPreview",
+      "phase: .authenticating",
+      "store?.signingCredential(id: request.credential.credentialIdData)",
+      "signingCredential.transactionPreviewPolicy == request.credential.transactionPreviewPolicy",
+      "signingCredential.sign(authenticatorData + request.clientDataHash)",
     ] where !source.contains(requiredFragment) {
       throw HarnessError("controller is missing security invariant: \(requiredFragment)")
     }
     for forbiddenFragment in [
       "URLSession.shared",
-      "showTransactionRequests",
-      "previewApiBaseUrl",
+      "pendingAssertionCredential",
+      "pendingAssertionClientDataHash",
+      "pendingAssertionRelyingPartyIdentifier",
+      "assertionPhase",
+      "pendingAssertionPrfInput",
+      "isCompletingAssertion",
+      "request.credential.sign(",
     ] where source.contains(forbiddenFragment) {
       throw HarnessError("controller retained mutable or redirecting path: \(forbiddenFragment)")
     }
