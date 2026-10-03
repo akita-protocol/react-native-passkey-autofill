@@ -27,3 +27,11 @@ xcrun swiftc \
 "${HARNESS_DIR}/passkey-pending-operation-harness" \
   "${PROVIDER_DIR}/CredentialProviderViewController.swift" \
   "${PROJECT_DIR}/app.plugin.js"
+
+xcrun swiftc \
+  "${PROVIDER_DIR}/TransactionPreviewPolicy.swift" \
+  "${SCRIPT_DIR}/passkey-credential-storage-harness.swift" \
+  -o "${HARNESS_DIR}/passkey-credential-storage-harness"
+
+"${HARNESS_DIR}/passkey-credential-storage-harness" \
+  "${PROVIDER_DIR}/PasskeyCredentialStore.swift"

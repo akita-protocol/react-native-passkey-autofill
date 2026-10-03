@@ -19,6 +19,9 @@ enum PasskeyCredentialStoreError: Error {
   case hdRootKeyUnavailable
   case invalidPrivateKey
   case signingFailed
+  /// A record already exists for this credential id (under any alias). Stored
+  /// passkeys are never overwritten, so their preview policy cannot be dropped.
+  case credentialAlreadyExists
 }
 
 /// Derives Akita site passkeys from the wallet's HD root. Used by the AutoFill
@@ -196,6 +199,7 @@ final class PasskeyCredentialStore {
   /// the policy, is quarantined — left out entirely rather than resolved by
   /// enumeration order, so a preview requirement can never silently disappear.
   func allCredentials() -> [StoredPasskeyCredential] {
+    migrateLegacyCredentials()
     let keystoreResult = allKeystoreCredentials()
     let legacyResult = allLegacyCredentials()
     return StoredPasskeyCredential.resolveCombinedTransactionPreviewAuthority(
@@ -248,6 +252,7 @@ final class PasskeyCredentialStore {
   /// and the legacy store — resolved so that a disagreement on the transaction
   /// preview policy yields nothing at all.
   private func resolvedCredential(id: Data, includePrivateKey: Bool) -> StoredPasskeyCredential? {
+    migrateLegacyCredentials()
     let candidates = credentialIdCandidates(id.base64EncodedString())
     let keystoreResult = keystoreCredentials(ids: candidates, includePrivateKey: includePrivateKey)
     let legacyResult = allLegacyCredentials()
@@ -285,17 +290,20 @@ final class PasskeyCredentialStore {
     }
   }
 
+  /// Stores a NEW passkey as a sealed keystore record — from the AutoFill
+  /// extension and from the app process alike (both reach MMKV through the
+  /// module's PasskeyKeystoreMMKV bridge). Never writes plaintext: without the
+  /// master key it throws. Never overwrites: if any record exists for the id
+  /// it throws ``PasskeyCredentialStoreError/credentialAlreadyExists``.
   func save(_ credential: StoredPasskeyCredential) throws {
-    unmarkCredentialDeleted(id: credential.credentialId)
-    #if PASSKEY_AUTOFILL_EXTENSION
-    try saveKeystoreCredential(credential)
-    #else
-    var credentials = allLegacyCredentials().credentials.filter {
-      $0.credentialId != credential.credentialId
+    migrateLegacyCredentials()
+    guard let id = Data(base64URLEncoded: credential.credentialId) ?? Data(base64Encoded: credential.credentialId),
+          !hasCredentialRecord(id: id)
+    else {
+      throw PasskeyCredentialStoreError.credentialAlreadyExists
     }
-    credentials.append(credential)
-    try replace(credentials)
-    #endif
+    try saveKeystoreCredential(credential)
+    unmarkCredentialDeleted(id: credential.credentialId)
   }
 
   /// Akita: maps the native bridge's (required, endpoint, token) triple onto the
@@ -315,14 +323,16 @@ final class PasskeyCredentialStore {
     try configureTransactionPreview(credentialId: credentialId, policy: policy)
   }
 
-  /// Akita: sets the transaction-preview policy on every stored record of
-  /// `credentialId` (each alias, in the keystore and the legacy store), so the
-  /// records can never disagree afterwards. Only this module's own keystore
-  /// passkey records are rewritten. Throws if no record exists.
+  /// Akita: sets the transaction-preview policy on every sealed record of
+  /// `credentialId` (each alias), so the records can never disagree afterwards.
+  /// Only this module's own keystore passkey records are rewritten, and the
+  /// bearer token only ever lands in sealed metadata. Throws if no sealed record
+  /// exists.
   func configureTransactionPreview(
     credentialId: String,
     policy: TransactionPreviewPolicy
   ) throws {
+    migrateLegacyCredentials()
     let candidates = credentialIdCandidates(credentialId)
     var encryptedUpdates: [(key: String, payload: String)] = []
     let appGroup = Bundle.main.object(forInfoDictionaryKey: Self.defaultSuiteNameKey) as? String
@@ -342,58 +352,30 @@ final class PasskeyCredentialStore {
       }
     }
 
-    // Restored passkeys written by the app process live in the legacy store.
-    // Rewrite their raw entries so unrelated (even undecodable) entries survive.
-    var legacyUpdate: Data?
-    if let data = defaults.data(forKey: credentialKey),
-       var entries = (try? JSONSerialization.jsonObject(with: data)) as? [Any]
-    {
-      var matched = false
-      for index in entries.indices {
-        guard var entry = entries[index] as? [String: Any],
-              let id = entry["credentialId"] as? String,
-              candidates.contains(id)
-        else { continue }
-        try policy.write(to: &entry)
-        entries[index] = entry
-        matched = true
-      }
-      if matched {
-        legacyUpdate = try JSONSerialization.data(withJSONObject: entries)
-      }
-    }
-
-    guard !encryptedUpdates.isEmpty || legacyUpdate != nil else {
+    guard !encryptedUpdates.isEmpty, let appGroup else {
       throw PasskeyCredentialStoreError.credentialNotFound
     }
 
     var firstWriteError: Error?
-    if let appGroup {
-      for update in encryptedUpdates {
-        do {
-          try PasskeyKeystoreMMKV.setString(update.payload, forKey: update.key, appGroup: appGroup)
-        } catch {
-          firstWriteError = firstWriteError ?? error
-        }
+    for update in encryptedUpdates {
+      do {
+        try PasskeyKeystoreMMKV.setString(update.payload, forKey: update.key, appGroup: appGroup)
+      } catch {
+        firstWriteError = firstWriteError ?? error
       }
-    }
-    if let legacyUpdate {
-      defaults.set(legacyUpdate, forKey: credentialKey)
     }
     if let firstWriteError {
       throw firstWriteError
     }
+    // Any legacy copy left after migration is a key-less quarantine entry; it
+    // would keep disagreeing with the policy just written, so it goes.
+    removeLegacyEntries(ids: candidates)
   }
 
   func removeCredential(id: String) throws {
     let candidateIds = credentialIdCandidates(id)
     markCredentialsDeleted(ids: candidateIds)
-    var credentials = allLegacyCredentials().credentials
-    let originalCount = credentials.count
-    credentials.removeAll { candidateIds.contains($0.credentialId) }
-    if credentials.count != originalCount {
-      try replace(credentials)
-    }
+    removeLegacyEntries(ids: candidateIds)
 
     guard let appGroup = Bundle.main.object(forInfoDictionaryKey: Self.defaultSuiteNameKey) as? String else {
       return
@@ -404,9 +386,95 @@ final class PasskeyCredentialStore {
     }
   }
 
+  /// Imports credentials (upstream's `replaceCredentialIdentities`). Each new one
+  /// is sealed like ``save(_:)``; one that already exists is left as it is, so an
+  /// import can never downgrade its preview policy. Nothing is written in
+  /// plaintext any more.
   func replace(_ credentials: [StoredPasskeyCredential]) throws {
-    let data = try JSONEncoder().encode(credentials)
-    defaults.set(data, forKey: credentialKey)
+    for credential in credentials {
+      do {
+        try save(credential)
+      } catch PasskeyCredentialStoreError.credentialAlreadyExists {
+        continue
+      }
+    }
+  }
+
+  // MARK: - Legacy plaintext store (migration only)
+
+  /// Earlier builds wrote passkeys created or restored in the app process to
+  /// App Group UserDefaults as plaintext JSON, private key and preview token
+  /// included. Seals them into the keystore (one record per credential, policy
+  /// preserved) and deletes the plaintext copies; see `LegacyCredentialMigration`
+  /// for the rules. Needs the master key; until it is available the entries stay
+  /// where they are and nothing new is ever added to them.
+  func migrateLegacyCredentials() {
+    guard let data = defaults.data(forKey: credentialKey) else { return }
+    guard let entries = (try? JSONSerialization.jsonObject(with: data)) as? [Any] else {
+      appendDiagnostic("legacy credential store is unreadable; leaving it in place")
+      return
+    }
+    guard masterKey() != nil,
+          Bundle.main.object(forInfoDictionaryKey: Self.defaultSuiteNameKey) is String
+    else { return }
+
+    let plan = LegacyCredentialMigration.plan(entries: entries) { [self] credentialId in
+      sealedState(credentialId: credentialId)
+    }
+    guard plan.changesLegacyStore else { return }
+
+    for credential in plan.toSeal {
+      do {
+        try saveKeystoreCredential(credential.withDerivedPublicKey())
+        unmarkCredentialDeleted(id: credential.credentialId)
+      } catch {
+        // Leave the legacy store untouched; the next access retries.
+        appendDiagnostic("legacy credential migration failed: \(error.localizedDescription)")
+        return
+      }
+    }
+    writeLegacyEntries(plan.remainingEntries)
+    appendDiagnostic("migrated \(plan.toSeal.count) legacy credential(s) into the sealed keystore")
+  }
+
+  private func sealedState(credentialId: String) -> SealedCredentialState {
+    let candidates = credentialIdCandidates(credentialId)
+    let result = keystoreCredentials(ids: candidates, includePrivateKey: false)
+    if !result.invalidTransactionPreviewCredentialIds.isDisjoint(with: candidates) {
+      return .unusable
+    }
+    guard let first = result.credentials.first else {
+      // A record nobody can read is never overwritten.
+      guard let appGroup = Bundle.main.object(forInfoDictionaryKey: Self.defaultSuiteNameKey) as? String,
+            !candidates.contains(where: { (try? PasskeyKeystoreMMKV.string(forKey: $0, appGroup: appGroup)) != nil })
+      else { return .unusable }
+      return .absent
+    }
+    guard result.credentials.allSatisfy({ $0.transactionPreviewPolicy == first.transactionPreviewPolicy }) else {
+      return .unusable
+    }
+    return .present(first.transactionPreviewPolicy)
+  }
+
+  private func removeLegacyEntries(ids: Set<String>) {
+    guard let data = defaults.data(forKey: credentialKey),
+          let entries = (try? JSONSerialization.jsonObject(with: data)) as? [Any]
+    else { return }
+    let remaining = entries.filter {
+      guard let id = ($0 as? [String: Any])?["credentialId"] as? String else { return true }
+      return !ids.contains(id)
+    }
+    if remaining.count != entries.count {
+      writeLegacyEntries(remaining)
+    }
+  }
+
+  private func writeLegacyEntries(_ entries: [Any]) {
+    if entries.isEmpty {
+      defaults.removeObject(forKey: credentialKey)
+    } else if let data = try? JSONSerialization.data(withJSONObject: entries) {
+      defaults.set(data, forKey: credentialKey)
+    }
   }
 
   private func allKeystoreCredentials() -> CredentialLoadResult {
@@ -541,12 +609,14 @@ final class PasskeyCredentialStore {
     ))
   }
 
-  #if PASSKEY_AUTOFILL_EXTENSION
+  /// Seals one passkey record. Available in the extension and the app module:
+  /// both reach the shared MMKV through the PasskeyKeystoreMMKV bridge.
   private func saveKeystoreCredential(_ credential: StoredPasskeyCredential) throws {
-    guard let masterKey = masterKey(),
-          let appGroup = Bundle.main.object(forInfoDictionaryKey: Self.defaultSuiteNameKey) as? String
-    else {
+    guard let appGroup = Bundle.main.object(forInfoDictionaryKey: Self.defaultSuiteNameKey) as? String else {
       throw PasskeyCredentialStoreError.appGroupUnavailable
+    }
+    guard let masterKey = masterKey() else {
+      throw PasskeyCredentialStoreError.masterKeyUnavailable
     }
     guard let privateKey = Data(base64URLEncoded: credential.privateKey) ?? Data(base64Encoded: credential.privateKey),
           let publicKeyString = credential.publicKey,
@@ -620,7 +690,6 @@ final class PasskeyCredentialStore {
       return
     }
   }
-  #endif
 
   func clear() {
     defaults.removeObject(forKey: credentialKey)
@@ -1171,6 +1240,31 @@ final class PasskeyCredentialStore {
 extension StoredPasskeyCredential {
   var credentialIdData: Data {
     Data(base64URLEncoded: credentialId) ?? Data()
+  }
+
+  /// The same record with `publicKey` filled from the private key when an old
+  /// legacy entry lacks it (a sealed record needs both).
+  func withDerivedPublicKey() throws -> StoredPasskeyCredential {
+    if let publicKey, !publicKey.isEmpty { return self }
+    guard let keyData = Data(base64URLEncoded: privateKey) ?? Data(base64Encoded: privateKey),
+          let key = (try? P256.Signing.PrivateKey(rawRepresentation: keyData))
+            ?? (try? P256.Signing.PrivateKey(derRepresentation: keyData))
+    else {
+      throw PasskeyCredentialStoreError.invalidPrivateKey
+    }
+    return StoredPasskeyCredential(
+      credentialId: credentialId,
+      relyingPartyIdentifier: relyingPartyIdentifier,
+      userName: userName,
+      userHandle: userHandle,
+      privateKey: privateKey,
+      publicKey: key.publicKey.derRepresentation.base64EncodedString(),
+      createdAt: createdAt,
+      lastUsedAt: lastUsedAt,
+      parentKeyId: parentKeyId,
+      derivationScheme: derivationScheme,
+      transactionPreviewPolicy: transactionPreviewPolicy
+    )
   }
 
   /// The same record with its private key stripped: what enumeration hands out.

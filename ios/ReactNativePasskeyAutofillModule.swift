@@ -248,6 +248,8 @@ public class ReactNativePasskeyAutofillModule: Module {
           userInfo: [NSLocalizedDescriptionKey: "App Group is not configured for passkey autofill."]
         )
       }
+      // Restored keys are written as sealed keystore records only (see
+      // PasskeyCredentialStore.save); earlier plaintext copies migrate on access.
       // Only the HD root shared through `setHdRootSecret` can reproduce a synced
       // site passkey; without it (or without the master key) nothing is restored.
       let parent = try store.parentSecret(scheme: PasskeyKeystoreRecords.schemeAkitaHdRoot)
@@ -306,6 +308,11 @@ public class ReactNativePasskeyAutofillModule: Module {
             transactionPreviewPolicy: previewPolicy
           ))
           restored.append(reportedId)
+        } catch PasskeyCredentialStoreError.credentialAlreadyExists {
+          skipped.append(["credentialId": reportedId, "reason": "exists"])
+        } catch PasskeyCredentialStoreError.masterKeyUnavailable {
+          // Sealed or nothing: never fall back to a plaintext copy.
+          throw PasskeyCredentialStoreError.masterKeyUnavailable
         } catch {
           skipped.append(["credentialId": reportedId, "reason": "error"])
         }

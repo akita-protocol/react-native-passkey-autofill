@@ -522,3 +522,92 @@ struct StoredPasskeyCredential: Codable {
     return (resolvedCredentials, invalidCredentialIds)
   }
 }
+
+/// What the sealed keystore holds for one credential id (all its aliases).
+enum SealedCredentialState: Equatable {
+  /// No record under any alias.
+  case absent
+  /// Readable records that agree on this policy.
+  case present(TransactionPreviewPolicy)
+  /// Records exist but are unreadable, malformed, or disagree: never touched.
+  case unusable
+}
+
+/// Moves passkeys out of the legacy App Group UserDefaults array, where earlier
+/// builds stored them as plaintext JSON (private key and preview token
+/// included), into sealed keystore records.
+///
+/// Pure planning, so the rules are testable on the host:
+/// - a valid entry with no sealed record is sealed (policy preserved) and dropped;
+/// - a valid entry whose sealed record agrees on the policy is dropped;
+/// - anything else (malformed policy, disagreeing sealed record or alias, no
+///   usable key) stays in the array with its private key removed, so the
+///   credential remains quarantined but no plaintext key survives;
+/// - non-dictionary or id-less entries are kept untouched.
+enum LegacyCredentialMigration {
+  struct Plan {
+    let toSeal: [StoredPasskeyCredential]
+    let remainingEntries: [Any]
+    var changesLegacyStore: Bool
+  }
+
+  static func plan(
+    entries: [Any],
+    sealedState: (String) -> SealedCredentialState
+  ) -> Plan {
+    var toSeal: [StoredPasskeyCredential] = []
+    var remaining: [Any] = []
+    var changed = false
+    var sealedThisRun: [String: TransactionPreviewPolicy] = [:]
+
+    for value in entries {
+      guard var entry = value as? [String: Any],
+            let credentialId = entry["credentialId"] as? String
+      else {
+        remaining.append(value)
+        continue
+      }
+      let canonicalId = passkeyCredentialCanonicalId(credentialId)
+
+      func keepStripped() {
+        if let key = entry["privateKey"], (key as? String) != "" {
+          entry["privateKey"] = ""
+          changed = true
+        }
+        remaining.append(entry)
+      }
+
+      guard JSONSerialization.isValidJSONObject(entry),
+            let data = try? JSONSerialization.data(withJSONObject: entry),
+            let credential = try? JSONDecoder().decode(StoredPasskeyCredential.self, from: data)
+      else {
+        keepStripped()
+        continue
+      }
+
+      let state: SealedCredentialState
+      if let policy = sealedThisRun[canonicalId] {
+        state = .present(policy)
+      } else {
+        state = sealedState(credentialId)
+      }
+
+      switch state {
+      case .absent:
+        guard !credential.privateKey.isEmpty else {
+          keepStripped()
+          continue
+        }
+        toSeal.append(credential)
+        sealedThisRun[canonicalId] = credential.transactionPreviewPolicy
+        changed = true
+      case .present(let policy) where policy == credential.transactionPreviewPolicy:
+        changed = true
+      case .present, .unusable:
+        keepStripped()
+      }
+    }
+
+    return Plan(toSeal: toSeal, remainingEntries: remaining, changesLegacyStore: changed)
+  }
+}
