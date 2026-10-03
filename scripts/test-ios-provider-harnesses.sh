@@ -36,3 +36,11 @@ xcrun swiftc \
 "${HARNESS_DIR}/passkey-credential-storage-harness" \
   "${PROVIDER_DIR}/PasskeyCredentialStore.swift" \
   "${PROVIDER_DIR}/CredentialProviderViewController.swift"
+
+xcrun swiftc \
+  "${PROVIDER_DIR}/KeystoreClearPolicy.swift" \
+  "${SCRIPT_DIR}/passkey-keystore-clear-harness.swift" \
+  -o "${HARNESS_DIR}/passkey-keystore-clear-harness"
+
+"${HARNESS_DIR}/passkey-keystore-clear-harness" \
+  "${PROVIDER_DIR}/PasskeyCredentialStore.swift"

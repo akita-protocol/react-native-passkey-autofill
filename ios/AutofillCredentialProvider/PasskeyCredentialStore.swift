@@ -692,6 +692,8 @@ final class PasskeyCredentialStore {
   }
 
   func clear() {
+    // Before the master key goes: legacy records need it to be recognised.
+    removeOwnedKeystoreRecords()
     defaults.removeObject(forKey: credentialKey)
     defaults.removeObject(forKey: Self.legacyCredentialKey)
     defaults.removeObject(forKey: Self.defaultDeletedCredentialIdsKey)
@@ -706,6 +708,27 @@ final class PasskeyCredentialStore {
     }
     if let query = keychainQuery(service: Self.defaultHdRootSecretKey) {
       _ = SecItemDelete(query as CFDictionary)
+    }
+  }
+
+  /// Removes this module's passkey records from the shared keystore, leaving the
+  /// wallet's own records alone (see `KeystoreClearPolicy`).
+  private func removeOwnedKeystoreRecords() {
+    guard let appGroup = Bundle.main.object(forInfoDictionaryKey: Self.defaultSuiteNameKey) as? String else {
+      return
+    }
+    let masterKey = masterKey()
+    let keys: [String] = PasskeyKeystoreMMKV.allKeys(forAppGroup: appGroup, error: nil)
+    let removable = KeystoreClearPolicy.keysToRemove(
+      allKeys: keys,
+      payloadFor: { try? PasskeyKeystoreMMKV.string(forKey: $0, appGroup: appGroup) },
+      legacyTypeFor: { payload in
+        guard let masterKey else { return nil }
+        return (try? self.decodeKeystorePayload(payload, masterKey: masterKey))?["type"] as? String
+      }
+    )
+    for key in removable {
+      try? PasskeyKeystoreMMKV.removeValue(forKey: key, appGroup: appGroup)
     }
   }
 
