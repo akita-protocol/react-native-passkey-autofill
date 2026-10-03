@@ -41,4 +41,16 @@ data class Credential(
     val showTransactionRequests: Boolean = false,
     val previewApiBaseUrl: String? = null,
     val previewToken: String? = null,
-)
+) {
+    /**
+     * Akita: the closed preview policy of this record. Throws for a stored
+     * tuple that is required but incomplete or invalid — callers treat that as
+     * "cannot be used", never as "no preview".
+     */
+    fun transactionPreviewPolicy(): TransactionPreviewPolicy =
+        if (showTransactionRequests) {
+            TransactionPreviewPolicy.validatedRequired(previewApiBaseUrl ?: "", previewToken ?: "")
+        } else {
+            TransactionPreviewPolicy.Never
+        }
+}

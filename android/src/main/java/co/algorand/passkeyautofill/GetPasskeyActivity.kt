@@ -31,6 +31,7 @@ import co.algorand.passkeyautofill.credentials.Credential
 import co.algorand.passkeyautofill.credentials.KeystoreRecords
 import co.algorand.passkeyautofill.credentials.ParentSecretResult
 import co.algorand.passkeyautofill.credentials.RelyingParty
+import co.algorand.passkeyautofill.credentials.TransactionPreviewPolicy
 import co.algorand.passkeyautofill.utils.PasskeyUtils
 import co.algorand.passkeyautofill.utils.PrivilegedBrowserAllowlist
 import java.security.KeyPair
@@ -197,14 +198,11 @@ class GetPasskeyActivity : AppCompatActivity() {
     }
 
     private fun fetchAndValidateTransactionPreview(credential: Credential): TransactionPreview {
-        val apiBaseUrl = credential.previewApiBaseUrl
+        // Closed policy: an incomplete or non-origin configuration fails here.
+        val policy = credential.transactionPreviewPolicy() as? TransactionPreviewPolicy.Required
             ?: throw IllegalStateException("Transaction preview is required but is not configured.")
-        val token = credential.previewToken
-            ?: throw IllegalStateException("Transaction preview is required but is not configured.")
-        val base = URL(apiBaseUrl)
-        if (base.protocol.lowercase() != "https") {
-            throw IllegalStateException("Transaction preview endpoint must use HTTPS.")
-        }
+        val token = policy.token
+        val base = URL(policy.httpsEndpoint)
         val credentialIdBytes = AndroidBase64.decode(credential.credentialId, AndroidBase64.DEFAULT)
         val credentialId = AndroidBase64.encodeToString(
             credentialIdBytes,
@@ -214,6 +212,10 @@ class GetPasskeyActivity : AppCompatActivity() {
         val connection = endpoint.openConnection() as HttpURLConnection
         try {
             connection.requestMethod = "GET"
+            // The bearer token goes to the configured origin only: no redirects,
+            // no cached or cookie-bearing state.
+            connection.instanceFollowRedirects = false
+            connection.useCaches = false
             connection.connectTimeout = 10_000
             connection.readTimeout = 15_000
             connection.setRequestProperty("Authorization", "Bearer $token")

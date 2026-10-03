@@ -6,6 +6,7 @@ import expo.modules.kotlin.modules.ModuleDefinition
 import co.algorand.passkeyautofill.credentials.Credential
 import co.algorand.passkeyautofill.credentials.CredentialRepository
 import co.algorand.passkeyautofill.credentials.KeystoreRecords
+import co.algorand.passkeyautofill.credentials.TransactionPreviewPolicy
 import co.algorand.passkeyautofill.service.PasskeyAutofillCredentialProviderService
 import android.content.ComponentName
 import android.content.Context
@@ -198,6 +199,9 @@ class ReactNativePasskeyAutofillModule : Module() {
           "userHandle" to credential.userHandle,
           "publicKey" to credential.publicKey,
           "derivationScheme" to credential.derivationScheme,
+          // Akita: the closed preview policy (null when the stored tuple is invalid,
+          // which the provider refuses to use), plus its legacy flat fields.
+          "transactionPreviewPolicy" to runCatching { credential.transactionPreviewPolicy().toMap() }.getOrNull(),
           "showTransactionRequests" to credential.showTransactionRequests,
           "previewApiBaseUrl" to credential.previewApiBaseUrl,
           "previewToken" to credential.previewToken,
@@ -235,6 +239,14 @@ class ReactNativePasskeyAutofillModule : Module() {
           skipped += mapOf("credentialId" to reportedId, "reason" to "exists")
           continue
         }
+        // The closed policy or the legacy flat fields, never both, never partial.
+        val previewPolicy = try {
+          TransactionPreviewPolicy.fromRestoreRecord(credential)
+        } catch (e: IllegalArgumentException) {
+          skipped += mapOf("credentialId" to reportedId, "reason" to "invalid")
+          continue
+        }
+        val previewRequired = previewPolicy as? TransactionPreviewPolicy.Required
 
         try {
           // Pinned to the HD root: fails (and the record is skipped) when the
@@ -262,9 +274,9 @@ class ReactNativePasskeyAutofillModule : Module() {
               count = 0,
               parentKeyId = derived.parentKeyId,
               derivationScheme = derived.derivationScheme,
-              showTransactionRequests = credential["showTransactionRequests"] as? Boolean ?: false,
-              previewApiBaseUrl = credential["previewApiBaseUrl"] as? String,
-              previewToken = credential["previewToken"] as? String,
+              showTransactionRequests = previewRequired != null,
+              previewApiBaseUrl = previewRequired?.httpsEndpoint,
+              previewToken = previewRequired?.token,
             ),
             null,
           )

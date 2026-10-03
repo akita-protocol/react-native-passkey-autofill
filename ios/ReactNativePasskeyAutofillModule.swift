@@ -195,7 +195,7 @@ public class ReactNativePasskeyAutofillModule: Module {
         return []
       }
 
-      return store.allCredentials().map { credential in
+      return try store.allCredentials().map { credential in
         var result: [String: Any] = [
           "credentialId": credential.credentialId,
           "relyingPartyIdentifier": credential.relyingPartyIdentifier,
@@ -216,12 +216,16 @@ public class ReactNativePasskeyAutofillModule: Module {
         if let derivationScheme = credential.derivationScheme {
           result["derivationScheme"] = derivationScheme
         }
-        result["showTransactionRequests"] = credential.showTransactionRequests ?? false
-        if let previewApiBaseUrl = credential.previewApiBaseUrl {
-          result["previewApiBaseUrl"] = previewApiBaseUrl
-        }
-        if let previewToken = credential.previewToken {
-          result["previewToken"] = previewToken
+        // Akita: the closed preview policy, plus the legacy flat fields derived
+        // from it for callers that predate the policy.
+        result["transactionPreviewPolicy"] = try credential.transactionPreviewPolicy.jsonObject()
+        switch credential.transactionPreviewPolicy {
+        case .never:
+          result["showTransactionRequests"] = false
+        case .required(let httpsEndpoint, let token):
+          result["showTransactionRequests"] = true
+          result["previewApiBaseUrl"] = httpsEndpoint.absoluteString
+          result["previewToken"] = token
         }
         // Platform-independent fields (Android's legacy keys differ in meaning).
         result["rpId"] = credential.relyingPartyIdentifier
@@ -262,8 +266,22 @@ public class ReactNativePasskeyAutofillModule: Module {
           continue
         }
 
-        if store.credential(id: expectedId) != nil {
+        // Any record under any alias counts, whatever its preview policy: a
+        // restore never adds a second, possibly disagreeing, copy.
+        if store.hasCredentialRecord(id: expectedId) {
           skipped.append(["credentialId": reportedId, "reason": "exists"])
+          continue
+        }
+
+        // The policy travels as the closed `transactionPreviewPolicy` or as the
+        // legacy flat fields — never both, never a partial tuple.
+        let previewPolicy: TransactionPreviewPolicy
+        do {
+          previewPolicy = try TransactionPreviewPolicy.migratingMetadata(
+            credential.filter { TransactionPreviewPolicy.persistedKeys.contains($0.key) }
+          )
+        } catch {
+          skipped.append(["credentialId": reportedId, "reason": "invalid"])
           continue
         }
 
@@ -285,9 +303,7 @@ public class ReactNativePasskeyAutofillModule: Module {
             lastUsedAt: nil,
             parentKeyId: parent.keyId,
             derivationScheme: parent.scheme,
-            showTransactionRequests: credential["showTransactionRequests"] as? Bool,
-            previewApiBaseUrl: credential["previewApiBaseUrl"] as? String,
-            previewToken: credential["previewToken"] as? String
+            transactionPreviewPolicy: previewPolicy
           ))
           restored.append(reportedId)
         } catch {

@@ -240,7 +240,11 @@ final class CredentialProviderViewController: ASCredentialProviderViewController
   ) {
     // `credential` was selected from the metadata-only list. Its private key is
     // opened here, after `evaluatePolicy` succeeded, for this one record only.
-    guard let signingCredential = store?.signingCredential(id: credential.credentialIdData) else {
+    // Only sign if the key's record still carries the preview policy this
+    // assertion was gated on.
+    guard let signingCredential = store?.signingCredential(id: credential.credentialIdData),
+          signingCredential.transactionPreviewPolicy == credential.transactionPreviewPolicy
+    else {
       isCompletingAssertion = false
       cancel(code: .credentialIdentityNotFound, message: "Credential not found.")
       return
@@ -301,18 +305,23 @@ final class CredentialProviderViewController: ASCredentialProviderViewController
     guard !isLoadingTransactionPreview, !isCompletingAssertion else {
       return
     }
-    guard let credential = pendingAssertionCredential,
-          credential.showTransactionRequests == true
-    else {
+    guard let credential = pendingAssertionCredential else {
       authenticateAndCompleteAssertion()
       return
     }
-    guard let apiBaseUrl = credential.previewApiBaseUrl,
-          let token = credential.previewToken,
-          !token.isEmpty,
-          let baseURL = URL(string: apiBaseUrl),
-          baseURL.scheme?.lowercased() == "https",
-          let encodedCredentialId = credential.credentialIdData.base64URLEncodedString()
+    // Closed policy: `.never` authenticates directly; `.required` always carries
+    // a validated HTTPS origin and token, so there is no partial state to skip.
+    let baseURL: URL
+    let token: String
+    switch credential.transactionPreviewPolicy {
+    case .never:
+      authenticateAndCompleteAssertion()
+      return
+    case .required(let httpsEndpoint, let previewToken):
+      baseURL = httpsEndpoint
+      token = previewToken
+    }
+    guard let encodedCredentialId = credential.credentialIdData.base64URLEncodedString()
             .addingPercentEncoding(withAllowedCharacters: .akitaURLPathComponent),
           let endpoint = URL(
             string: "/akita/passkey-previews/\(encodedCredentialId)",
@@ -331,7 +340,19 @@ final class CredentialProviderViewController: ASCredentialProviderViewController
     request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
     request.setValue("application/json", forHTTPHeaderField: "Accept")
 
-    URLSession.shared.dataTask(with: request) { [weak self] data, response, error in
+    // Ephemeral, cache- and cookie-free, and redirects are refused: the bearer
+    // token only ever goes to the configured origin.
+    let configuration = URLSessionConfiguration.ephemeral
+    configuration.httpShouldSetCookies = false
+    configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
+    configuration.urlCache = nil
+    let session = URLSession(
+      configuration: configuration,
+      delegate: RejectingRedirectSessionDelegate(),
+      delegateQueue: nil
+    )
+    session.dataTask(with: request) { [weak self] data, response, error in
+      session.finishTasksAndInvalidate()
       DispatchQueue.main.async {
         guard let self else { return }
         self.isLoadingTransactionPreview = false
@@ -601,6 +622,18 @@ final class CredentialProviderViewController: ASCredentialProviderViewController
     }
 
     throw PasskeyCredentialStoreError.invalidPrivateKey
+  }
+}
+
+private final class RejectingRedirectSessionDelegate: NSObject, URLSessionTaskDelegate {
+  func urlSession(
+    _ session: URLSession,
+    task: URLSessionTask,
+    willPerformHTTPRedirection response: HTTPURLResponse,
+    newRequest request: URLRequest,
+    completionHandler: @escaping (URLRequest?) -> Void
+  ) {
+    completionHandler(nil)
   }
 }
 

@@ -34,6 +34,7 @@
     "test": "CI=true expo-module test",
     "test:android": "cd example/android && ./gradlew :akta-react-native-passkey-autofill:testDebugUnitTest --no-daemon",
     "test:android:instrumented": "cd example/android && ./gradlew :akta-react-native-passkey-autofill:connectedDebugAndroidTest --no-daemon",
+    "test:ios": "bash ./scripts/test-ios-provider-harnesses.sh",
     "test:all": "pnpm run test && pnpm run test:android",
     "prepublishOnly": "expo-module prepublishOnly",
     "open:ios": "xed example/ios",

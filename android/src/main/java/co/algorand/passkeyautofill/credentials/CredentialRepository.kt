@@ -1090,6 +1090,8 @@ class Repository() : CredentialRepository {
         apiBaseUrl: String,
         token: String,
     ) {
+        // Closed policy: refuse a partial or contradictory triple before touching storage.
+        val policy = TransactionPreviewPolicy.fromNativeConfiguration(enabled, apiBaseUrl, token)
         val mmkv = getPasskeysMMKV(context)
         val masterKey = getMasterKey(context) ?: throw MasterKeyUnavailableException()
         for (candidate in credentialIdCandidates(credentialId)) {
@@ -1101,13 +1103,17 @@ class Repository() : CredentialRepository {
             }
             if (!KeystoreRecords.isPasskeyRecordType(keyData.optString("type", ""))) continue
             val metadata = keyData.optJSONObject("metadata") ?: JSONObject()
-            metadata.put("showTransactionRequests", enabled)
-            if (enabled) {
-                metadata.put("previewApiBaseUrl", apiBaseUrl)
-                metadata.put("previewToken", token)
-            } else {
-                metadata.remove("previewApiBaseUrl")
-                metadata.remove("previewToken")
+            when (policy) {
+                is TransactionPreviewPolicy.Required -> {
+                    metadata.put("showTransactionRequests", true)
+                    metadata.put("previewApiBaseUrl", policy.httpsEndpoint)
+                    metadata.put("previewToken", policy.token)
+                }
+                is TransactionPreviewPolicy.Never -> {
+                    metadata.put("showTransactionRequests", false)
+                    metadata.remove("previewApiBaseUrl")
+                    metadata.remove("previewToken")
+                }
             }
             keyData.put("metadata", metadata)
             val encoded = AndroidBase64.encodeToString(

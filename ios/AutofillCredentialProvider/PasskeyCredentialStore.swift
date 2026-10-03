@@ -73,33 +73,12 @@ struct PasskeyParentSecret {
   let bytes: Data
 }
 
-struct StoredPasskeyCredential: Codable {
-  let credentialId: String
-  let relyingPartyIdentifier: String
-  let userName: String
-  let userHandle: String
-  /// Base64 private material, or `""` when the record was read without it.
-  /// Only ``PasskeyCredentialStore/signingCredential(id:)`` fills this, for the
-  /// one credential the user selected and was verified for; enumeration and
-  /// metadata lookups leave it empty.
-  let privateKey: String
-  let publicKey: String?
-  let createdAt: Double
-  let lastUsedAt: Double?
-  let parentKeyId: String?
-  /// The derivation scheme this credential is pinned to for life
-  /// (`PasskeyKeystoreRecords.schemePbkdf2P256` or `.schemeBip32Ed25519`).
-  ///
-  /// `nil` on every credential created before the wallet exposed its
-  /// deterministic-P256 main key, and those all derive from the BIP32-Ed25519
-  /// root — re-deriving one against a different parent produces a different key
-  /// and silently breaks the passkey the relying party already trusts.
-  var derivationScheme: String? = nil
-  /// Akita: whether an assertion must first show the user a transaction preview
-  /// fetched from `previewApiBaseUrl` with `previewToken`.
-  var showTransactionRequests: Bool? = nil
-  var previewApiBaseUrl: String? = nil
-  var previewToken: String? = nil
+/// One load of stored credentials plus the ids quarantined for an invalid or
+/// conflicting transaction-preview policy. (`StoredPasskeyCredential` itself
+/// lives in TransactionPreviewPolicy.swift.)
+private struct CredentialLoadResult {
+  let credentials: [StoredPasskeyCredential]
+  let invalidTransactionPreviewCredentialIds: Set<String>
 }
 
 /// The on-disk record format shared with the wallet's
@@ -211,27 +190,38 @@ final class PasskeyCredentialStore {
   /// scalar is copied into an immutable string for records the user may never
   /// select. Load exactly one credential's key afterwards with
   /// ``signingCredential(id:)``.
+  ///
+  /// Akita: a credential whose transaction-preview policy is malformed, or whose
+  /// aliases (the same id in another encoding or in the other store) disagree on
+  /// the policy, is quarantined — left out entirely rather than resolved by
+  /// enumeration order, so a preview requirement can never silently disappear.
   func allCredentials() -> [StoredPasskeyCredential] {
-    let keystoreCredentials = allKeystoreCredentials()
-    let legacyCredentials = allLegacyCredentials().map { $0.withoutPrivateKey() }
-    var credentialsById: [String: StoredPasskeyCredential] = [:]
-
-    for credential in legacyCredentials {
-      credentialsById[credential.credentialId] = credential
-    }
-
-    for credential in keystoreCredentials {
-      credentialsById[credential.credentialId] = credential
-    }
-
-    return Array(credentialsById.values)
+    let keystoreResult = allKeystoreCredentials()
+    let legacyResult = allLegacyCredentials()
+    return StoredPasskeyCredential.resolveCombinedTransactionPreviewAuthority(
+      legacyCredentials: legacyResult.credentials.map { $0.withoutPrivateKey() },
+      keystoreCredentials: keystoreResult.credentials,
+      invalidCredentialIds: keystoreResult.invalidTransactionPreviewCredentialIds.union(
+        legacyResult.invalidTransactionPreviewCredentialIds
+      )
+    ) { [weak self] credentialId in
+      self?.appendDiagnostic(
+        "skipping conflicting transaction preview policies for credential: \(credentialId)"
+      )
+    }.credentials
   }
 
-  private func allLegacyCredentials() -> [StoredPasskeyCredential] {
-    guard let data = defaults.data(forKey: credentialKey),
-          let credentials = try? JSONDecoder().decode([StoredPasskeyCredential].self, from: data)
-    else { return [] }
-    return credentials
+  private func allLegacyCredentials() -> CredentialLoadResult {
+    guard let data = defaults.data(forKey: credentialKey) else {
+      return CredentialLoadResult(credentials: [], invalidTransactionPreviewCredentialIds: [])
+    }
+    let result = StoredPasskeyCredential.decodePersistedArrayRecords(data) { [weak self] credentialId in
+      self?.appendDiagnostic("skipping invalid legacy credential: \(credentialId ?? "unknown")")
+    }
+    return CredentialLoadResult(
+      credentials: result.credentials,
+      invalidTransactionPreviewCredentialIds: result.invalidCredentialIds
+    )
   }
 
   /// Candidates for a relying party, metadata only (see ``allCredentials()``).
@@ -239,12 +229,11 @@ final class PasskeyCredentialStore {
     allCredentials().filter { $0.relyingPartyIdentifier == relyingPartyIdentifier }
   }
 
-  /// The credential stored under `id`, METADATA ONLY. Reads just that record.
+  /// The credential stored under `id`, METADATA ONLY. Reads just that
+  /// credential's records (every alias), with the same quarantine rule as
+  /// ``allCredentials()``.
   func credential(id: Data) -> StoredPasskeyCredential? {
-    if let credential = keystoreCredential(id: id, includePrivateKey: false) {
-      return credential
-    }
-    return legacyCredential(id: id)?.withoutPrivateKey()
+    resolvedCredential(id: id, includePrivateKey: false)
   }
 
   /// The credential stored under `id` WITH its private key. This is the only
@@ -252,16 +241,48 @@ final class PasskeyCredentialStore {
   /// has been verified for the assertion, and let the result go out of scope
   /// as soon as the signature is produced.
   func signingCredential(id: Data) -> StoredPasskeyCredential? {
-    if let credential = keystoreCredential(id: id, includePrivateKey: true) {
-      return credential
-    }
-    return legacyCredential(id: id)
+    resolvedCredential(id: id, includePrivateKey: true)
   }
 
-  private func legacyCredential(id: Data) -> StoredPasskeyCredential? {
-    let encodedId = id.base64EncodedString()
-    let urlEncodedId = id.base64URLEncodedString()
-    return allLegacyCredentials().first { $0.credentialId == encodedId || $0.credentialId == urlEncodedId }
+  /// Every stored record of one credential — each id encoding, in the keystore
+  /// and the legacy store — resolved so that a disagreement on the transaction
+  /// preview policy yields nothing at all.
+  private func resolvedCredential(id: Data, includePrivateKey: Bool) -> StoredPasskeyCredential? {
+    let candidates = credentialIdCandidates(id.base64EncodedString())
+    let keystoreResult = keystoreCredentials(ids: candidates, includePrivateKey: includePrivateKey)
+    let legacyResult = allLegacyCredentials()
+    let legacyCredentials = legacyResult.credentials
+      .filter { candidates.contains($0.credentialId) }
+      .map { includePrivateKey ? $0 : $0.withoutPrivateKey() }
+    return StoredPasskeyCredential.resolveCombinedTransactionPreviewAuthority(
+      legacyCredentials: legacyCredentials,
+      keystoreCredentials: keystoreResult.credentials,
+      invalidCredentialIds: keystoreResult.invalidTransactionPreviewCredentialIds.union(
+        legacyResult.invalidTransactionPreviewCredentialIds
+      )
+    ) { [weak self] credentialId in
+      self?.appendDiagnostic(
+        "refusing credential with conflicting transaction preview policies: \(credentialId)"
+      )
+    }.credentials.first
+  }
+
+  /// Whether any record exists for `id` — under any alias, in either store —
+  /// regardless of whether it reads back as a usable credential.
+  func hasCredentialRecord(id: Data) -> Bool {
+    let candidates = credentialIdCandidates(id.base64EncodedString())
+    if let appGroup = Bundle.main.object(forInfoDictionaryKey: Self.defaultSuiteNameKey) as? String,
+       candidates.contains(where: { (try? PasskeyKeystoreMMKV.string(forKey: $0, appGroup: appGroup)) != nil })
+    {
+      return true
+    }
+    guard let data = defaults.data(forKey: credentialKey),
+          let entries = (try? JSONSerialization.jsonObject(with: data)) as? [Any]
+    else { return false }
+    return entries.contains {
+      guard let id = ($0 as? [String: Any])?["credentialId"] as? String else { return false }
+      return candidates.contains(id)
+    }
   }
 
   func save(_ credential: StoredPasskeyCredential) throws {
@@ -269,55 +290,105 @@ final class PasskeyCredentialStore {
     #if PASSKEY_AUTOFILL_EXTENSION
     try saveKeystoreCredential(credential)
     #else
-    var credentials = allLegacyCredentials().filter { $0.credentialId != credential.credentialId }
+    var credentials = allLegacyCredentials().credentials.filter {
+      $0.credentialId != credential.credentialId
+    }
     credentials.append(credential)
     try replace(credentials)
     #endif
   }
 
-  /// Akita: sets whether assertions with `credentialId` must show a transaction
-  /// preview first, and where to fetch it. Only this module's keystore passkey
-  /// records are updated.
+  /// Akita: maps the native bridge's (required, endpoint, token) triple onto the
+  /// closed policy, refusing anything that is not exactly `.never` or a complete
+  /// `.required(origin, token)`, and stores it.
   func configureTransactionPreview(
     credentialId: String,
     enabled: Bool,
     apiBaseUrl: String,
     token: String
   ) throws {
-    guard let masterKey = masterKey(),
-          let appGroup = Bundle.main.object(forInfoDictionaryKey: Self.defaultSuiteNameKey) as? String
-    else {
-      throw PasskeyCredentialStoreError.appGroupUnavailable
-    }
-    for candidate in credentialIdCandidates(credentialId) {
-      guard let payload = try? PasskeyKeystoreMMKV.string(forKey: candidate, appGroup: appGroup),
-            let keyData = try? decodeKeystorePayload(payload, masterKey: masterKey),
-            let type = keyData["type"] as? String,
-            type == "hd-derived-p256" || type == "xhd-derived-p256"
-      else { continue }
-      var updated = keyData
-      var metadata = keyData["metadata"] as? [String: Any] ?? [:]
-      metadata["showTransactionRequests"] = enabled
-      if enabled {
-        metadata["previewApiBaseUrl"] = apiBaseUrl
-        metadata["previewToken"] = token
-      } else {
-        metadata.removeValue(forKey: "previewApiBaseUrl")
-        metadata.removeValue(forKey: "previewToken")
+    let policy = try TransactionPreviewPolicy.fromNativeConfiguration(
+      required: enabled,
+      httpsEndpoint: apiBaseUrl,
+      token: token
+    )
+    try configureTransactionPreview(credentialId: credentialId, policy: policy)
+  }
+
+  /// Akita: sets the transaction-preview policy on every stored record of
+  /// `credentialId` (each alias, in the keystore and the legacy store), so the
+  /// records can never disagree afterwards. Only this module's own keystore
+  /// passkey records are rewritten. Throws if no record exists.
+  func configureTransactionPreview(
+    credentialId: String,
+    policy: TransactionPreviewPolicy
+  ) throws {
+    let candidates = credentialIdCandidates(credentialId)
+    var encryptedUpdates: [(key: String, payload: String)] = []
+    let appGroup = Bundle.main.object(forInfoDictionaryKey: Self.defaultSuiteNameKey) as? String
+    if let masterKey = masterKey(), let appGroup {
+      for candidate in candidates {
+        guard let payload = try? PasskeyKeystoreMMKV.string(forKey: candidate, appGroup: appGroup),
+              let keyData = try? decodeKeystorePayload(payload, masterKey: masterKey),
+              let type = keyData["type"] as? String,
+              type == "hd-derived-p256" || type == "xhd-derived-p256"
+        else { continue }
+        var updated = keyData
+        var metadata = keyData["metadata"] as? [String: Any] ?? [:]
+        try policy.write(to: &metadata)
+        updated["metadata"] = metadata
+        let encoded = try encodeKeyData(updated)
+        encryptedUpdates.append((candidate, try encryptData(masterKey, encoded)))
       }
-      updated["metadata"] = metadata
-      let encoded = try encodeKeyData(updated)
-      let encrypted = try encryptData(masterKey, encoded)
-      try PasskeyKeystoreMMKV.setString(encrypted, forKey: candidate, appGroup: appGroup)
-      return
     }
-    throw PasskeyCredentialStoreError.credentialNotFound
+
+    // Restored passkeys written by the app process live in the legacy store.
+    // Rewrite their raw entries so unrelated (even undecodable) entries survive.
+    var legacyUpdate: Data?
+    if let data = defaults.data(forKey: credentialKey),
+       var entries = (try? JSONSerialization.jsonObject(with: data)) as? [Any]
+    {
+      var matched = false
+      for index in entries.indices {
+        guard var entry = entries[index] as? [String: Any],
+              let id = entry["credentialId"] as? String,
+              candidates.contains(id)
+        else { continue }
+        try policy.write(to: &entry)
+        entries[index] = entry
+        matched = true
+      }
+      if matched {
+        legacyUpdate = try JSONSerialization.data(withJSONObject: entries)
+      }
+    }
+
+    guard !encryptedUpdates.isEmpty || legacyUpdate != nil else {
+      throw PasskeyCredentialStoreError.credentialNotFound
+    }
+
+    var firstWriteError: Error?
+    if let appGroup {
+      for update in encryptedUpdates {
+        do {
+          try PasskeyKeystoreMMKV.setString(update.payload, forKey: update.key, appGroup: appGroup)
+        } catch {
+          firstWriteError = firstWriteError ?? error
+        }
+      }
+    }
+    if let legacyUpdate {
+      defaults.set(legacyUpdate, forKey: credentialKey)
+    }
+    if let firstWriteError {
+      throw firstWriteError
+    }
   }
 
   func removeCredential(id: String) throws {
     let candidateIds = credentialIdCandidates(id)
     markCredentialsDeleted(ids: candidateIds)
-    var credentials = allLegacyCredentials()
+    var credentials = allLegacyCredentials().credentials
     let originalCount = credentials.count
     credentials.removeAll { candidateIds.contains($0.credentialId) }
     if credentials.count != originalCount {
@@ -338,42 +409,69 @@ final class PasskeyCredentialStore {
     defaults.set(data, forKey: credentialKey)
   }
 
-  private func allKeystoreCredentials() -> [StoredPasskeyCredential] {
+  private func allKeystoreCredentials() -> CredentialLoadResult {
     guard let masterKey = masterKey(),
           let appGroup = Bundle.main.object(forInfoDictionaryKey: Self.defaultSuiteNameKey) as? String
     else {
       appendDiagnostic("keystore credentials unavailable: missing master key or app group")
-      return []
+      return CredentialLoadResult(credentials: [], invalidTransactionPreviewCredentialIds: [])
     }
 
     let keys: [String] = PasskeyKeystoreMMKV.allKeys(forAppGroup: appGroup, error: nil)
     appendDiagnostic("keystore allKeys count: \(keys.count)")
-    return keys.compactMap { key -> StoredPasskeyCredential? in
-      guard let payload = try? PasskeyKeystoreMMKV.string(forKey: key, appGroup: appGroup) else {
-        appendDiagnostic("skipping keystore key: \(key)")
-        return nil
-      }
-      // Enumeration: the material stays undecoded.
-      return keystoreCredential(payload: payload, key: key, masterKey: masterKey, includePrivateKey: false)
-    }
+    // Enumeration: the material stays undecoded.
+    return keystoreCredentials(keys: keys, masterKey: masterKey, appGroup: appGroup, includePrivateKey: false)
   }
 
-  /// Reads the single keystore record for `id` (in any of its encodings)
+  /// Reads the keystore records stored under `ids` (one credential's aliases)
   /// without scanning the store.
-  private func keystoreCredential(id: Data, includePrivateKey: Bool) -> StoredPasskeyCredential? {
+  private func keystoreCredentials(ids: Set<String>, includePrivateKey: Bool) -> CredentialLoadResult {
     guard let masterKey = masterKey(),
           let appGroup = Bundle.main.object(forInfoDictionaryKey: Self.defaultSuiteNameKey) as? String
-    else { return nil }
+    else {
+      return CredentialLoadResult(credentials: [], invalidTransactionPreviewCredentialIds: [])
+    }
+    return keystoreCredentials(
+      keys: Array(ids),
+      masterKey: masterKey,
+      appGroup: appGroup,
+      includePrivateKey: includePrivateKey
+    )
+  }
 
-    for candidate in credentialIdCandidates(id.base64EncodedString()) {
-      guard let payload = try? PasskeyKeystoreMMKV.string(forKey: candidate, appGroup: appGroup) else { continue }
-      if let credential = keystoreCredential(
-        payload: payload, key: candidate, masterKey: masterKey, includePrivateKey: includePrivateKey
+  private func keystoreCredentials(
+    keys: [String],
+    masterKey: Data,
+    appGroup: String,
+    includePrivateKey: Bool
+  ) -> CredentialLoadResult {
+    var credentials: [StoredPasskeyCredential] = []
+    var invalidIds: Set<String> = []
+    for key in keys {
+      guard let payload = try? PasskeyKeystoreMMKV.string(forKey: key, appGroup: appGroup) else {
+        continue
+      }
+      switch keystoreCredential(
+        payload: payload, key: key, masterKey: masterKey, includePrivateKey: includePrivateKey
       ) {
-        return credential
+      case .credential(let credential):
+        credentials.append(credential)
+      case .invalidTransactionPreviewPolicy(let id):
+        invalidIds.formUnion(credentialIdCandidates(id))
+        invalidIds.formUnion(credentialIdCandidates(key))
+      case .notACredential:
+        continue
       }
     }
-    return nil
+    return CredentialLoadResult(credentials: credentials, invalidTransactionPreviewCredentialIds: invalidIds)
+  }
+
+  private enum KeystoreCredentialRead {
+    case credential(StoredPasskeyCredential)
+    /// A passkey record whose preview policy is malformed: quarantined, never
+    /// read as `.never`.
+    case invalidTransactionPreviewPolicy(id: String)
+    case notACredential
   }
 
   /// Decodes one keystore record into a ``StoredPasskeyCredential``.
@@ -389,21 +487,29 @@ final class PasskeyCredentialStore {
     key: String,
     masterKey: Data,
     includePrivateKey: Bool
-  ) -> StoredPasskeyCredential? {
+  ) -> KeystoreCredentialRead {
     guard let keyData = try? decodeKeystorePayload(payload, masterKey: masterKey),
           let id = keyData["id"] as? String,
           let publicKey = dataArray(keyData["publicKey"]),
           keyData["privateKey"] != nil
     else {
       appendDiagnostic("skipping keystore key: \(key)")
-      return nil
+      return .notACredential
+    }
+
+    let transactionPreviewPolicy: TransactionPreviewPolicy
+    do {
+      transactionPreviewPolicy = try TransactionPreviewPolicy.migratingKeystoreMetadata(from: keyData)
+    } catch {
+      appendDiagnostic("skipping keystore credential with invalid transaction preview policy: \(id)")
+      return .invalidTransactionPreviewPolicy(id: id)
     }
 
     let privateKey: String
     if includePrivateKey {
       guard let material = dataArray(keyData["privateKey"]) else {
         appendDiagnostic("skipping keystore key with undecodable material: \(key)")
-        return nil
+        return .notACredential
       }
       privateKey = material.base64EncodedString()
     } else {
@@ -416,11 +522,11 @@ final class PasskeyCredentialStore {
     let parentKeyId = metadata?["parentKeyId"] as? String ?? keyData["parentKeyId"] as? String
     guard !origin.isEmpty, !userHandle.isEmpty else {
       appendDiagnostic("skipping keystore credential missing metadata: \(id)")
-      return nil
+      return .notACredential
     }
     let rawUserName = metadata?["userName"] as? String ?? keyData["userName"] as? String ?? userHandle
 
-    return StoredPasskeyCredential(
+    return .credential(StoredPasskeyCredential(
       credentialId: id,
       relyingPartyIdentifier: origin.relyingPartyIdentifier,
       userName: rawUserName.passkeyDisplayName,
@@ -431,10 +537,8 @@ final class PasskeyCredentialStore {
       lastUsedAt: metadata?["lastUsedAt"] as? Double,
       parentKeyId: parentKeyId,
       derivationScheme: metadata?["scheme"] as? String,
-      showTransactionRequests: metadata?["showTransactionRequests"] as? Bool,
-      previewApiBaseUrl: metadata?["previewApiBaseUrl"] as? String,
-      previewToken: metadata?["previewToken"] as? String
-    )
+      transactionPreviewPolicy: transactionPreviewPolicy
+    ))
   }
 
   #if PASSKEY_AUTOFILL_EXTENSION
@@ -471,15 +575,7 @@ final class PasskeyCredentialStore {
     if let derivationScheme = credential.derivationScheme {
       metadata["scheme"] = derivationScheme
     }
-    if let showTransactionRequests = credential.showTransactionRequests {
-      metadata["showTransactionRequests"] = showTransactionRequests
-    }
-    if let previewApiBaseUrl = credential.previewApiBaseUrl {
-      metadata["previewApiBaseUrl"] = previewApiBaseUrl
-    }
-    if let previewToken = credential.previewToken {
-      metadata["previewToken"] = previewToken
-    }
+    try credential.transactionPreviewPolicy.write(to: &metadata)
 
     let keyData: [String: Any] = [
       "id": credential.credentialId,
@@ -939,12 +1035,7 @@ final class PasskeyCredentialStore {
   }
 
   private func credentialIdCandidates(_ id: String) -> Set<String> {
-    var candidates: Set<String> = [id]
-    if let data = Data(base64URLEncoded: id) ?? Data(base64Encoded: id) {
-      candidates.insert(data.base64EncodedString())
-      candidates.insert(data.base64URLEncodedString())
-    }
-    return candidates
+    passkeyCredentialIdCandidates(id)
   }
 
   private func deletedCredentialIds() -> Set<String> {
@@ -1095,9 +1186,7 @@ extension StoredPasskeyCredential {
       lastUsedAt: lastUsedAt,
       parentKeyId: parentKeyId,
       derivationScheme: derivationScheme,
-      showTransactionRequests: showTransactionRequests,
-      previewApiBaseUrl: previewApiBaseUrl,
-      previewToken: previewToken
+      transactionPreviewPolicy: transactionPreviewPolicy
     )
   }
 

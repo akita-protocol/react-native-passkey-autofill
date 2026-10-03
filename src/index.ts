@@ -3,3 +3,4 @@
 export { default } from "./ReactNativePasskeyAutofillModule";
 export * from "./ReactNativePasskeyAutofill.types";
 export * from "./PasskeyDerivation";
+export * from "./TransactionPreviewPolicy";

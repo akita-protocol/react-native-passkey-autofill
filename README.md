@@ -140,6 +140,37 @@ await ReactNativePasskeyAutofill.configureIntentActions(
 await ReactNativePasskeyAutofill.clearCredentials();
 ```
 
+### Akita additions
+
+This fork adds the APIs the Akita wallet uses on top of upstream:
+
+```typescript
+import ReactNativePasskeyAutofill, {
+  configureCredentialTransactionPreviewPolicy,
+} from "@akta/react-native-passkey-autofill";
+
+// The wallet's HD root, as raw bytes. New site passkeys derive from it
+// (derivation scheme "akita-hd-root"); it is stored like the master key and the
+// promise rejects if it could not be stored.
+await ReactNativePasskeyAutofill.setHdRootSecret(hdRootBytes);
+
+// Closed transaction-preview policy for one passkey: exactly `{ kind: "never" }`
+// or `{ kind: "required", httpsEndpoint, token }` with an HTTPS origin. Anything
+// else is rejected before (and again inside) native code.
+await configureCredentialTransactionPreviewPolicy(credentialId, {
+  kind: "required",
+  httpsEndpoint: "https://gateway.example",
+  token: previewToken,
+});
+
+// Synced site passkeys from the wallet's other devices; each must re-derive to
+// its credential ID from the HD root. Existing credentials are never overwritten.
+const { restored, skipped } = await ReactNativePasskeyAutofill.restoreDerivedCredentials(records);
+```
+
+`getStoredCredentials()` reports `rpId`, `userIdBase64Url`, `userDisplayName` and
+`transactionPreviewPolicy` with the same meaning on iOS and Android.
+
 ## Events
 
 You can listen for events emitted by the native module when a passkey is successfully added or authenticated.

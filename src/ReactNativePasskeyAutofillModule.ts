@@ -57,6 +57,10 @@ declare class ReactNativePasskeyAutofillModule extends NativeModule<ReactNativeP
    * `credentialId` signs an assertion. When enabled, the provider fetches the
    * pending preview from `apiBaseUrl` with `token` as a bearer token, checks it
    * matches the request's client data, and asks the user to approve it.
+   *
+   * The triple must describe the closed policy exactly — `(false, "", "")` or
+   * `(true, <https origin>, <token>)` — or the call rejects. Prefer
+   * `configureCredentialTransactionPreviewPolicy(credentialId, policy)`.
    */
   configureCredentialTransactionPreview(
     credentialId: string,

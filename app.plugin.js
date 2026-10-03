@@ -20,6 +20,7 @@ const IOS_EXTENSION_FILES = [
   "PasskeyKeystoreMMKV.mm",
   "PasskeyAutofillCredentialProvider-Bridging-Header.h",
   "PasskeyCredentialStore.swift",
+  "TransactionPreviewPolicy.swift",
   "WebAuthn.swift",
   "BiometricRequirement.swift",
   "Prf.swift",
