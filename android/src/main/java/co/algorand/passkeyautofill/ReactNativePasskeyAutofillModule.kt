@@ -4,6 +4,7 @@ import expo.modules.kotlin.exception.CodedException
 import expo.modules.kotlin.modules.Module
 import expo.modules.kotlin.modules.ModuleDefinition
 import co.algorand.passkeyautofill.credentials.Credential
+import co.algorand.passkeyautofill.credentials.CredentialAlreadyExistsException
 import co.algorand.passkeyautofill.credentials.CredentialRepository
 import co.algorand.passkeyautofill.credentials.KeystoreRecords
 import co.algorand.passkeyautofill.credentials.TransactionPreviewPolicy
@@ -220,7 +221,6 @@ class ReactNativePasskeyAutofillModule : Module() {
     AsyncFunction("restoreDerivedCredentials") { credentials: List<Map<String, Any?>> ->
       val context = (appContext.reactContext ?: appContext.hostingRuntimeContext) as? Context
         ?: throw IllegalStateException("No context available to restore passkeys.")
-      val existingIds = credentialRepository.getAllCredentials(context).map { it.credentialId }.toSet()
       val restored = mutableListOf<String>()
       val skipped = mutableListOf<Map<String, String>>()
 
@@ -235,7 +235,9 @@ class ReactNativePasskeyAutofillModule : Module() {
           continue
         }
         val storedId = AndroidBase64.encodeToString(expectedId, AndroidBase64.NO_WRAP)
-        if (storedId in existingIds) {
+        // Any copy under any id spelling counts: a restore never adds a second,
+        // possibly disagreeing, copy.
+        if (credentialRepository.hasCredentialRecord(context, expectedId)) {
           skipped += mapOf("credentialId" to reportedId, "reason" to "exists")
           continue
         }
@@ -281,6 +283,8 @@ class ReactNativePasskeyAutofillModule : Module() {
             null,
           )
           restored += reportedId
+        } catch (e: CredentialAlreadyExistsException) {
+          skipped += mapOf("credentialId" to reportedId, "reason" to "exists")
         } catch (e: Exception) {
           PasskeyLog.e(CredentialRepository.TAG, "Failed to restore a synced passkey", e)
           skipped += mapOf("credentialId" to reportedId, "reason" to "error")

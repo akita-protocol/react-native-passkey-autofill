@@ -331,12 +331,11 @@ class Repository() : CredentialRepository {
     override fun saveCredential(context: Context, credential: Credential, biometricCipher: Cipher?) {
         PasskeyLog.d(CredentialRepository.TAG, "saveCredential started")
         val mmkv = getPasskeysMMKV(context)
-        val newId = try {
-            AndroidBase64.decode(credential.credentialId, AndroidBase64.DEFAULT)
-        } catch (e: IllegalArgumentException) {
-            throw IllegalArgumentException("Credential id is not base64", e)
+        // Never overwrite: an existing copy under any id spelling keeps its record
+        // (and its transaction-preview policy).
+        if (hasRecordUnder(mmkv, CredentialAliases.candidates(credential.credentialId))) {
+            throw CredentialAlreadyExistsException()
         }
-        if (hasCredentialRecord(context, newId)) throw CredentialAlreadyExistsException()
         
         // 1. Create KeyData matching @algorandfoundation/keystore
         val keyData = JSONObject()
@@ -394,12 +393,11 @@ class Repository() : CredentialRepository {
     }
 
     override fun hasCredentialRecord(context: Context, credentialId: ByteArray): Boolean {
-        val mmkv = getPasskeysMMKV(context)
-        val id = AndroidBase64.encodeToString(credentialId, AndroidBase64.DEFAULT).trim()
-        return credentialIdCandidates(id).any {
-            mmkv.containsKey(it) || mmkv.containsKey(KeystoreRecords.metadataKey(it))
-        }
+        return hasRecordUnder(getPasskeysMMKV(context), CredentialAliases.candidates(credentialId))
     }
+
+    private fun hasRecordUnder(mmkv: MMKV, candidates: Set<String>): Boolean =
+        candidates.any { mmkv.containsKey(it) || mmkv.containsKey(KeystoreRecords.metadataKey(it)) }
 
     override fun getAllCredentials(context: Context): List<Credential> {
         val mmkv = getPasskeysMMKV(context)
@@ -443,7 +441,9 @@ class Repository() : CredentialRepository {
                 continue
             }
         }
-        return credentials
+        // One entry per credential; one whose copies disagree on the preview
+        // policy is not offered at all.
+        return CredentialAliases.quarantine(credentials)
     }
 
     /**
@@ -553,36 +553,59 @@ class Repository() : CredentialRepository {
         biometricCipher: Cipher?,
         includeMaterial: Boolean,
     ): Credential? {
-        val id = AndroidBase64.encodeToString(credentialId, AndroidBase64.DEFAULT).trim()
         PasskeyLog.d(CredentialRepository.TAG, "readCredential started (includeMaterial=$includeMaterial)")
         val mmkv = getPasskeysMMKV(context)
+        val candidates = CredentialAliases.candidates(credentialId)
+        val copies = mutableListOf<Credential>()
 
-        // Split layout first: its metadata half is plaintext, so it reads without
-        // the master key. The id is base64 and has historically been written in
-        // several encodings, hence the candidates.
-        for (candidate in credentialIdCandidates(id)) {
+        // Every copy, under every id spelling. Split layout first: its metadata
+        // half is plaintext, so it reads without the master key.
+        for (candidate in candidates) {
             val plaintext = mmkv.decodeString(KeystoreRecords.metadataKey(candidate)) ?: continue
-            try {
-                credentialFromMetadataRecord(JSONObject(plaintext))?.let { return it }
+            val copy = try {
+                credentialFromMetadataRecord(JSONObject(plaintext))
             } catch (e: Exception) {
-                PasskeyLog.w(CredentialRepository.TAG, "Unreadable metadata record for a credential id candidate", e)
+                null
+            }
+            // A copy that exists but cannot be read could hide a different
+            // preview policy: fail closed.
+            copies.add(copy ?: return unreadableAlias())
+        }
+
+        val flatCandidates = candidates.filter { mmkv.containsKey(it) }
+        if (flatCandidates.isNotEmpty()) {
+            val masterKey = getMasterKey(context) ?: run {
+                PasskeyLog.e(CredentialRepository.TAG, "Master key not found")
+                return null
+            }
+            for (candidate in flatCandidates) {
+                val payload = mmkv.decodeString(candidate) ?: return unreadableAlias()
+                val copy = try {
+                    credentialFromLegacyRecord(
+                        KeystoreRecords.decodeLegacyRecord(payload, masterKey),
+                        biometricCipher,
+                        includeMaterial,
+                    )
+                } catch (e: Exception) {
+                    null
+                }
+                copies.add(copy ?: return unreadableAlias())
             }
         }
 
-        val payload = mmkv.decodeString(id) ?: run {
-            PasskeyLog.w(CredentialRepository.TAG, "No payload found for credential id")
+        if (copies.isEmpty()) {
+            PasskeyLog.w(CredentialRepository.TAG, "No record found for credential id")
             return null
         }
-        val masterKey = getMasterKey(context) ?: run {
-            PasskeyLog.e(CredentialRepository.TAG, "Master key not found")
-            return null
-        }
-        return try {
-            val json = KeystoreRecords.decodeLegacyRecord(payload, masterKey)
-            credentialFromLegacyRecord(json, biometricCipher, includeMaterial)
-        } catch (e: Exception) {
+        return CredentialAliases.resolve(copies) ?: run {
+            PasskeyLog.e(CredentialRepository.TAG, "Copies of a credential disagree on its transaction preview policy; refusing it")
             null
         }
+    }
+
+    private fun unreadableAlias(): Credential? {
+        PasskeyLog.e(CredentialRepository.TAG, "A copy of the credential cannot be read; refusing it")
+        return null
     }
 
     override fun getCredentialByOrigin(context: Context, origin: String): Credential? {
@@ -1122,15 +1145,8 @@ class Repository() : CredentialRepository {
         val policy = TransactionPreviewPolicy.fromNativeConfiguration(enabled, apiBaseUrl, token)
         val mmkv = getPasskeysMMKV(context)
         val masterKey = getMasterKey(context) ?: throw MasterKeyUnavailableException()
-        for (candidate in credentialIdCandidates(credentialId)) {
-            val payload = mmkv.decodeString(candidate) ?: continue
-            val keyData = try {
-                KeystoreRecords.decodeLegacyRecord(payload, masterKey)
-            } catch (e: Exception) {
-                continue
-            }
-            if (!KeystoreRecords.isPasskeyRecordType(keyData.optString("type", ""))) continue
-            val metadata = keyData.optJSONObject("metadata") ?: JSONObject()
+
+        fun applyPolicy(metadata: JSONObject) {
             when (policy) {
                 is TransactionPreviewPolicy.Required -> {
                     metadata.put("showTransactionRequests", true)
@@ -1143,17 +1159,51 @@ class Repository() : CredentialRepository {
                     metadata.remove("previewToken")
                 }
             }
-            keyData.put("metadata", metadata)
-            val encoded = AndroidBase64.encodeToString(
-                keyData.toString().toByteArray(Charsets.UTF_8),
-                AndroidBase64.URL_SAFE or AndroidBase64.NO_WRAP,
-            )
-            check(mmkv.encode(candidate, KeystoreRecords.sealEnvelope(masterKey, encoded))) {
-                "Failed to write the transaction preview configuration"
-            }
-            return
         }
-        throw IllegalArgumentException("Passkey credential was not found")
+
+        // Prepare a rewrite of EVERY copy (each id spelling, sealed flat and `k/`
+        // metadata) before writing any, so a copy that cannot be updated aborts
+        // the whole change instead of leaving copies that disagree.
+        val writes = mutableListOf<Pair<String, String>>()
+        for (candidate in CredentialAliases.candidates(credentialId)) {
+            mmkv.decodeString(candidate)?.let { payload ->
+                val keyData = try {
+                    KeystoreRecords.decodeLegacyRecord(payload, masterKey)
+                } catch (e: Exception) {
+                    throw IllegalStateException("A copy of the passkey cannot be opened; refusing to configure it", e)
+                }
+                check(KeystoreRecords.isPasskeyRecordType(keyData.optString("type", ""))) {
+                    "Credential id addresses a record this module does not own"
+                }
+                val metadata = keyData.optJSONObject("metadata") ?: JSONObject()
+                applyPolicy(metadata)
+                keyData.put("metadata", metadata)
+                val encoded = AndroidBase64.encodeToString(
+                    keyData.toString().toByteArray(Charsets.UTF_8),
+                    AndroidBase64.URL_SAFE or AndroidBase64.NO_WRAP,
+                )
+                writes += candidate to KeystoreRecords.sealEnvelope(masterKey, encoded)
+            }
+            val metadataKey = KeystoreRecords.metadataKey(candidate)
+            mmkv.decodeString(metadataKey)?.let { plaintext ->
+                val record = try {
+                    JSONObject(plaintext)
+                } catch (e: Exception) {
+                    throw IllegalStateException("A copy of the passkey cannot be read; refusing to configure it", e)
+                }
+                check(KeystoreRecords.isPasskeyRecordType(record.optString("type", ""))) {
+                    "Credential id addresses a record this module does not own"
+                }
+                val metadata = record.optJSONObject("metadata") ?: JSONObject()
+                applyPolicy(metadata)
+                record.put("metadata", metadata)
+                writes += metadataKey to record.toString()
+            }
+        }
+        if (writes.isEmpty()) throw IllegalArgumentException("Passkey credential was not found")
+        for ((key, value) in writes) {
+            check(mmkv.encode(key, value)) { "Failed to write the transaction preview configuration" }
+        }
     }
 
     override fun recordCredentialUsage(context: Context, credentialId: ByteArray) {
@@ -1179,24 +1229,7 @@ class Repository() : CredentialRepository {
         }
     }
 
-    private fun credentialIdCandidates(id: String): Set<String> {
-        val candidates = mutableSetOf(id)
-        val decoded = try {
-            AndroidBase64.decode(id, AndroidBase64.URL_SAFE or AndroidBase64.NO_WRAP)
-        } catch (_: Exception) {
-            try {
-                AndroidBase64.decode(id, AndroidBase64.DEFAULT)
-            } catch (_: Exception) {
-                null
-            }
-        }
-
-        if (decoded != null) {
-            candidates.add(AndroidBase64.encodeToString(decoded, AndroidBase64.DEFAULT).trim())
-            candidates.add(AndroidBase64.encodeToString(decoded, AndroidBase64.URL_SAFE or AndroidBase64.NO_WRAP or AndroidBase64.NO_PADDING))
-        }
-        return candidates
-    }
+    private fun credentialIdCandidates(id: String): Set<String> = CredentialAliases.candidates(id)
 
     private fun hexToBytes(hex: String): ByteArray {
         val result = ByteArray(hex.length / 2)

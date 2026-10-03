@@ -28,6 +28,7 @@ import co.algorand.passkeyautofill.auth.BiometricRequirement
 import co.algorand.passkeyautofill.auth.UserVerification
 import co.algorand.passkeyautofill.credentials.CredentialRepository
 import co.algorand.passkeyautofill.credentials.Credential
+import co.algorand.passkeyautofill.credentials.CredentialAliases
 import co.algorand.passkeyautofill.credentials.KeystoreRecords
 import co.algorand.passkeyautofill.credentials.ParentSecretResult
 import co.algorand.passkeyautofill.credentials.RelyingParty
@@ -75,6 +76,8 @@ class GetPasskeyActivity : AppCompatActivity() {
     private var isHandling: Boolean = false
     private var isLoadingTransactionPreview: Boolean = false
     private var hasApprovedTransactionPreview: Boolean = false
+    /** The preview policy the assertion was gated on; signing must see the same one. */
+    private var gatedPreviewPolicy: Triple<Boolean, String?, String?>? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -168,13 +171,16 @@ class GetPasskeyActivity : AppCompatActivity() {
         if (isHandling || isLoadingTransactionPreview) return
         lifecycleScope.launch {
             try {
+                // Null when the credential is missing or its copies disagree on the
+                // preview policy: never fall through to signing without a preview.
                 val credential = credentialIdEnc?.let {
                     credentialRepository.getCredentialMetadata(
                         this@GetPasskeyActivity,
                         AndroidBase64.decode(it, AndroidBase64.DEFAULT),
                     )
-                }
-                if (credential?.showTransactionRequests == true && !hasApprovedTransactionPreview) {
+                } ?: throw IllegalStateException("This passkey is unavailable.")
+                gatedPreviewPolicy = CredentialAliases.policyKey(credential)
+                if (credential.showTransactionRequests && !hasApprovedTransactionPreview) {
                     isLoadingTransactionPreview = true
                     setupPreviewLoadingUI()
                     val preview = try {
@@ -704,6 +710,10 @@ class GetPasskeyActivity : AppCompatActivity() {
             PasskeyLog.d(TAG, "Getting credential metadata from repository")
             val dbCred = credentialRepository.getCredentialMetadata(this@GetPasskeyActivity, credId)
                 ?: throw IllegalStateException("Credential not found")
+            // Sign only under the preview policy the flow was gated on.
+            check(gatedPreviewPolicy != null && CredentialAliases.policyKey(dbCred) == gatedPreviewPolicy) {
+                "The passkey's transaction preview policy changed; refusing to sign"
+            }
 
             // The chooser is RP-scoped, but the pending intent carries whatever
             // credential id it was built with: re-establish the invariant here,
