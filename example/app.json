@@ -28,7 +28,7 @@
     },
     "plugins": [
       [
-        "@algorandfoundation/react-native-passkey-autofill",
+        "@akta/react-native-passkey-autofill",
         {
           "site": "https://debug.liquidauth.com",
           "label": "Passkey AutoFill Example"

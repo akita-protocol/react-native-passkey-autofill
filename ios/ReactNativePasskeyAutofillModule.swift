@@ -16,7 +16,7 @@ public class ReactNativePasskeyAutofillModule: Module {
 
     Events("onPasskeyAdded", "onPasskeyAuthenticated")
 
-    AsyncFunction("setMasterKey") { (secret: String) in
+    AsyncFunction("setMasterKey") { (secret: Data) in
       guard let store = PasskeyCredentialStore() else {
         throw NSError(
           domain: "ReactNativePasskeyAutofill",
@@ -27,6 +27,42 @@ public class ReactNativePasskeyAutofillModule: Module {
       store.saveMasterKey(secret)
     }
 
+    // Points the passkey hierarchy at the wallet's deterministic-P256 main key.
+    // The scheme is not a parameter: it is read from the record's own metadata, so
+    // a wallet cannot mislabel which hierarchy it handed us.
+    AsyncFunction("setMainKeyId") { (id: String) in
+      guard let store = PasskeyCredentialStore() else {
+        throw NSError(
+          domain: "ReactNativePasskeyAutofill",
+          code: 1,
+          userInfo: [NSLocalizedDescriptionKey: "App Group is not configured for passkey autofill."]
+        )
+      }
+      store.saveMainKeyId(id)
+    }
+
+    // Akita: shares the wallet's HD root secret directly. New passkeys derive
+    // from it (scheme `akita-hd-root`); it is kept in the shared Keychain group.
+    AsyncFunction("setHdRootSecret") { (secret: Data) in
+      guard let store = PasskeyCredentialStore() else {
+        throw NSError(
+          domain: "ReactNativePasskeyAutofill",
+          code: 1,
+          userInfo: [NSLocalizedDescriptionKey: "App Group is not configured for passkey autofill."]
+        )
+      }
+      try store.saveHdRootSecret(secret)
+    }
+
+    AsyncFunction("getMainKeyId") { () -> String? in
+      guard let store = PasskeyCredentialStore() else {
+        return nil
+      }
+      return store.mainKeyId()
+    }
+
+    // Deprecated aliases of the two above, kept because installed wallets still
+    // call them. They address the same slot — see `saveMainKeyId`.
     AsyncFunction("setHdRootKeyId") { (id: String) in
       guard let store = PasskeyCredentialStore() else {
         throw NSError(
@@ -35,25 +71,14 @@ public class ReactNativePasskeyAutofillModule: Module {
           userInfo: [NSLocalizedDescriptionKey: "App Group is not configured for passkey autofill."]
         )
       }
-      store.saveHdRootKeyId(id)
-    }
-
-    AsyncFunction("setHdRootSecret") { (secret: String) in
-      guard let store = PasskeyCredentialStore() else {
-        throw NSError(
-          domain: "ReactNativePasskeyAutofill",
-          code: 1,
-          userInfo: [NSLocalizedDescriptionKey: "App Group is not configured for passkey autofill."]
-        )
-      }
-      store.saveHdRootSecret(secret)
+      store.saveMainKeyId(id)
     }
 
     AsyncFunction("getHdRootKeyId") { () -> String? in
       guard let store = PasskeyCredentialStore() else {
         return nil
       }
-      return store.hdRootKeyId()
+      return store.mainKeyId()
     }
 
     AsyncFunction("clearCredentials") {
@@ -72,6 +97,7 @@ public class ReactNativePasskeyAutofillModule: Module {
       try await store.replaceIdentityStore()
     }
 
+    // Akita: credential-scoped native transaction preview.
     AsyncFunction("configureCredentialTransactionPreview") {
       (credentialId: String, enabled: Bool, apiBaseUrl: String, token: String) in
       guard let store = PasskeyCredentialStore() else {
@@ -138,7 +164,13 @@ public class ReactNativePasskeyAutofillModule: Module {
           privateKey: privateKey,
           publicKey: credential["publicKey"] as? String ?? credential["publicKeyBase64"] as? String,
           createdAt: credential["createdAt"] as? Double ?? Date().timeIntervalSince1970,
-          parentKeyId: credential["parentKeyId"] as? String ?? metadata?["parentKeyId"] as? String
+          lastUsedAt: credential["lastUsedAt"] as? Double ?? metadata?["lastUsedAt"] as? Double,
+          parentKeyId: credential["parentKeyId"] as? String ?? metadata?["parentKeyId"] as? String,
+          // A wallet inserting a credential it derived itself says which root it
+          // used; absent, the credential reads back as pinned to the legacy
+          // BIP32-Ed25519 root.
+          derivationScheme: credential["derivationScheme"] as? String
+            ?? metadata?["scheme"] as? String
         )
       }
 
@@ -163,7 +195,7 @@ public class ReactNativePasskeyAutofillModule: Module {
         return []
       }
 
-      return store.allCredentials().map { credential in
+      return try store.allCredentials().map { credential in
         var result: [String: Any] = [
           "credentialId": credential.credentialId,
           "relyingPartyIdentifier": credential.relyingPartyIdentifier,
@@ -175,15 +207,25 @@ public class ReactNativePasskeyAutofillModule: Module {
         if let publicKey = credential.publicKey {
           result["publicKey"] = publicKey
         }
+        if let lastUsedAt = credential.lastUsedAt {
+          result["lastUsedAt"] = lastUsedAt
+        }
         if let parentKeyId = credential.parentKeyId {
           result["parentKeyId"] = parentKeyId
         }
-        result["showTransactionRequests"] = credential.showTransactionRequests ?? false
-        if let previewApiBaseUrl = credential.previewApiBaseUrl {
-          result["previewApiBaseUrl"] = previewApiBaseUrl
+        if let derivationScheme = credential.derivationScheme {
+          result["derivationScheme"] = derivationScheme
         }
-        if let previewToken = credential.previewToken {
-          result["previewToken"] = previewToken
+        // Akita: the closed preview policy, plus the legacy flat fields derived
+        // from it for callers that predate the policy.
+        result["transactionPreviewPolicy"] = try credential.transactionPreviewPolicy.jsonObject()
+        switch credential.transactionPreviewPolicy {
+        case .never:
+          result["showTransactionRequests"] = false
+        case .required(let httpsEndpoint, let token):
+          result["showTransactionRequests"] = true
+          result["previewApiBaseUrl"] = httpsEndpoint.absoluteString
+          result["previewToken"] = token
         }
         // Platform-independent fields (Android's legacy keys differ in meaning).
         result["rpId"] = credential.relyingPartyIdentifier
@@ -206,8 +248,9 @@ public class ReactNativePasskeyAutofillModule: Module {
           userInfo: [NSLocalizedDescriptionKey: "App Group is not configured for passkey autofill."]
         )
       }
-      let rootSecret = try store.hdRootKeySecret()
-      let parentKeyId = store.hdRootKeyId()
+      // Only the HD root shared through `setHdRootSecret` can reproduce a synced
+      // site passkey; without it (or without the master key) nothing is restored.
+      let parent = try store.parentSecret(scheme: PasskeyKeystoreRecords.schemeAkitaHdRoot)
       var restored: [String] = []
       var skipped: [[String: String]] = []
 
@@ -223,13 +266,27 @@ public class ReactNativePasskeyAutofillModule: Module {
           continue
         }
 
-        if store.credential(id: expectedId) != nil {
+        // Any record under any alias counts, whatever its preview policy: a
+        // restore never adds a second, possibly disagreeing, copy.
+        if store.hasCredentialRecord(id: expectedId) {
           skipped.append(["credentialId": reportedId, "reason": "exists"])
           continue
         }
 
+        // The policy travels as the closed `transactionPreviewPolicy` or as the
+        // legacy flat fields — never both, never a partial tuple.
+        let previewPolicy: TransactionPreviewPolicy
         do {
-          let key = try SiteCredentialDerivation.privateKey(rootSecret: rootSecret, rpId: rpId, handle: handle)
+          previewPolicy = try TransactionPreviewPolicy.migratingMetadata(
+            credential.filter { TransactionPreviewPolicy.persistedKeys.contains($0.key) }
+          )
+        } catch {
+          skipped.append(["credentialId": reportedId, "reason": "invalid"])
+          continue
+        }
+
+        do {
+          let key = try SiteCredentialDerivation.privateKey(rootSecret: parent.bytes, rpId: rpId, handle: handle)
           guard SiteCredentialDerivation.credentialId(publicKey: key.publicKey) == expectedId else {
             skipped.append(["credentialId": reportedId, "reason": "mismatch"])
             continue
@@ -243,10 +300,10 @@ public class ReactNativePasskeyAutofillModule: Module {
             privateKey: key.rawRepresentation.base64EncodedString(),
             publicKey: key.publicKey.derRepresentation.base64EncodedString(),
             createdAt: createdAtMillis.map { $0 / 1000 } ?? Date().timeIntervalSince1970,
-            parentKeyId: parentKeyId,
-            showTransactionRequests: credential["showTransactionRequests"] as? Bool,
-            previewApiBaseUrl: credential["previewApiBaseUrl"] as? String,
-            previewToken: credential["previewToken"] as? String
+            lastUsedAt: nil,
+            parentKeyId: parent.keyId,
+            derivationScheme: parent.scheme,
+            transactionPreviewPolicy: previewPolicy
           ))
           restored.append(reportedId)
         } catch {

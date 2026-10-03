@@ -29,6 +29,7 @@ Pod::Spec.new do |s|
     "*.{h,m,mm,swift,hpp,cpp}",
     "AutofillCredentialProvider/PasskeyAutofillCredentialProvider-Bridging-Header.h",
     "AutofillCredentialProvider/PasskeyCredentialStore.swift",
+    "AutofillCredentialProvider/TransactionPreviewPolicy.swift",
     "AutofillCredentialProvider/PasskeyKeystoreMMKV.h",
     "AutofillCredentialProvider/PasskeyKeystoreMMKV.mm"
   ]

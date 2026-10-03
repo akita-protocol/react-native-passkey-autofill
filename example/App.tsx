@@ -1,4 +1,4 @@
-import ReactNativePasskeyAutofill from "@algorandfoundation/react-native-passkey-autofill";
+import ReactNativePasskeyAutofill from "@akta/react-native-passkey-autofill";
 import { AppState, Button, SafeAreaView, ScrollView, Text, View, StyleSheet } from "react-native";
 import { useEffect, useState } from "react";
 import { Passkey } from "react-native-passkey";
@@ -99,7 +99,7 @@ function AppContent() {
     if (passkeys.length > 0 && !activePasskeyId) {
       setActivePasskeyId(passkeys[0].id);
     }
-  }, [keys, passkeys]);
+  }, [keys, passkeys, activePasskeyId]);
 
   useEffect(() => {
     if (!account) {
@@ -205,7 +205,8 @@ function AppContent() {
         return;
       }
 
-      await ReactNativePasskeyAutofill.setHdRootKeyId(ed25519Key.metadata.parentKeyId);
+      // Set the P-256 main key ID (parent secret for passkey derivation)
+      await ReactNativePasskeyAutofill.setMainKeyId(ed25519Key.metadata.parentKeyId);
 
       const response = await fetch("https://debug.liquidauth.com/attestation/request", {
         method: "POST",
@@ -233,7 +234,10 @@ function AppContent() {
       await fullReload();
 
       if (ed25519Key && ed25519Key.publicKey) {
-        const challenge = fromBase64Url(options.challenge);
+        // The attestation options are a WebAuthn PublicKeyCredentialCreationOptions
+        // wrapped in `publicKey`; fall back to a flat shape just in case.
+        const challengeB64Url = options?.publicKey?.challenge ?? options?.challenge;
+        const challenge = fromBase64Url(challengeB64Url);
         const signature = await key.store.sign(xhdEd25519KeyId, challenge);
 
         result.clientExtensionResults = {

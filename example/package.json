@@ -12,9 +12,9 @@
     "test": "jest"
   },
   "dependencies": {
+    "@akta/react-native-passkey-autofill": "workspace:*",
     "@algorandfoundation/keystore": "1.0.0-canary.15",
-    "@algorandfoundation/react-native-keystore": "1.0.0-canary.11",
-    "@algorandfoundation/react-native-passkey-autofill": "workspace:*",
+    "@algorandfoundation/react-native-keystore": "1.0.0-canary.12",
     "@algorandfoundation/wallet-provider": "1.0.0-canary.5",
     "@noble/hashes": "^2.2.0",
     "@scure/base": "^2.0.0",
@@ -44,8 +44,8 @@
   },
   "jest": {
     "moduleNameMapper": {
-      "^@algorandfoundation/(.*)$": "<rootDir>/../node_modules/@algorandfoundation/$1",
-      "^@algorandfoundation/react-native-passkey-autofill$": "<rootDir>/.."
+      "^@akta/react-native-passkey-autofill$": "<rootDir>/..",
+      "^@algorandfoundation/(.*)$": "<rootDir>/../node_modules/@algorandfoundation/$1"
     },
     "preset": "jest-expo",
     "transformIgnorePatterns": [

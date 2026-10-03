@@ -44,6 +44,23 @@ If you are using Expo, you can configure the plugin in your `app.json` or `app.c
 
 - `site`: The URL of your FIDO server (default: `https://debug.liquidauth.com`).
 - `label`: The name of the credential provider as it appears in Android settings (default: `My Credential Provider`).
+- `aaguid`: Optional authenticator AAGUID (UUID string) embedded in attestation responses to identify your authenticator to relying parties. When omitted, iOS uses the module's built-in default and Android uses the all-zero AAGUID emitted by the platform. Set the same value across all your apps (iOS, Android, web) so they present one identity.
+- `biometricRequirement`: Controls which authenticators satisfy passkey user verification. See [Biometric Requirement](#biometric-requirement) below.
+
+#### Biometric Requirement
+
+`biometricRequirement` is an optional string property that controls which authenticators are accepted for user verification during passkey creation and authentication.
+
+| Value                          | Android                                                                                  | iOS                                 |
+| ------------------------------ | ---------------------------------------------------------------------------------------- | ----------------------------------- |
+| `strong`                       | Strong biometric only                                                                    | Biometrics only (passcode rejected) |
+| `strongOrCredential` (default) | Strong biometric or device PIN/pattern/password                                          | Biometrics or device passcode       |
+| `weakOrCredential`             | Weak biometric or device credential (key is **not** crypto-bound — a security trade-off) | Biometrics or device passcode       |
+
+**Notes:**
+
+- Android cannot gate a hardware-backed key on weak biometrics, so `weakOrCredential` stores the key without user-authentication binding and uses the biometric prompt as a UI gate only. Use it only when you accept that trade-off.
+- The default `strongOrCredential` is more permissive than the previous strong-only behavior; integrators upgrading will additionally allow the device credential on Android (iOS behavior is unchanged).
 
 ### Configure for iOS
 
@@ -81,15 +98,20 @@ For iOS integration, make sure that:
 - The app has a `webcredentials:<domain>` associated domain, and that domain serves a valid `apple-app-site-association` file for the app identifier.
 - The deployment target is iOS 17 or newer for passkey credential provider support.
 - The generated extension target can link `AuthenticationServices.framework`, `CryptoKit.framework`, `MMKVCore`, and the deterministic P-256 Swift package.
+
+The deterministic P-256 Swift package is pinned to an exact upstream commit, not a branch, because it derives passkey keys from the wallet's root material and produces the signatures; a branch head can change between two prebuilds of the same wallet commit. To move the pin, set `deterministicP256PackageRevision` in the plugin props to a full 40-character commit SHA you have reviewed. The former `deterministicP256PackageBranch` prop is rejected. CI checks the generated Xcode project for any Swift package requirement that is not a commit revision.
+
 - `NSFaceIDUsageDescription` is present when biometric authentication is used.
 
-At runtime, the app must provide the native side with the master key, identify the HD root key stored in MMKV, and keep the iOS identity store in sync:
+At runtime, the app must provide the native side with the master key, identify the P-256 main key (the parent secret for passkey derivation) stored in MMKV, and keep the iOS identity store in sync:
 
 ```typescript
-await ReactNativePasskeyAutofill.setMasterKey(masterKeyHex);
-await ReactNativePasskeyAutofill.setHdRootKeyId(hdRootKeyId);
+await ReactNativePasskeyAutofill.setMasterKey(masterKeyBytes);
+await ReactNativePasskeyAutofill.setMainKeyId(mainKeyId);
 await ReactNativePasskeyAutofill.refreshCredentialIdentities();
 ```
+
+The `mainKeyId` points at the keystore record whose sealed material is the 64-byte parent secret. The native side determines the derivation scheme from the record's metadata (`pbkdf2-p256` is preferred; legacy `bip32-ed25519` is also supported).
 
 Call `refreshCredentialIdentities()` after creating, importing, deleting, or restoring passkeys so iOS AutoFill sees the current credentials.
 
@@ -98,11 +120,15 @@ Call `refreshCredentialIdentities()` after creating, importing, deleting, or res
 ```typescript
 import ReactNativePasskeyAutofill from "@akta/react-native-passkey-autofill";
 
-// 1. Set the master key for encryption (hex string)
-await ReactNativePasskeyAutofill.setMasterKey(masterKeyHex);
+// 1. Set the master key for encryption (raw bytes — never a hex string, so
+//    the secret isn't materialized as a non-zeroable JS string). The promise
+//    REJECTS if the key cannot be stored and verified; until it resolves no
+//    passkey can be created, so surface the failure rather than continuing.
+await ReactNativePasskeyAutofill.setMasterKey(masterKeyBytes);
 
-// 2. Set the HD root key ID if applicable
-await ReactNativePasskeyAutofill.setHdRootKeyId(hdRootKeyId);
+// 2. Set the P-256 main key ID (parent secret for passkey derivation).
+//    The legacy `setHdRootKeyId(id)` is a deprecated alias for this method.
+await ReactNativePasskeyAutofill.setMainKeyId(mainKeyId);
 
 // 3. Configure intent actions for the Passkey flows
 await ReactNativePasskeyAutofill.configureIntentActions(
@@ -113,6 +139,37 @@ await ReactNativePasskeyAutofill.configureIntentActions(
 // Optional: Clear credentials
 await ReactNativePasskeyAutofill.clearCredentials();
 ```
+
+### Akita additions
+
+This fork adds the APIs the Akita wallet uses on top of upstream:
+
+```typescript
+import ReactNativePasskeyAutofill, {
+  configureCredentialTransactionPreviewPolicy,
+} from "@akta/react-native-passkey-autofill";
+
+// The wallet's HD root, as raw bytes. New site passkeys derive from it
+// (derivation scheme "akita-hd-root"); it is stored like the master key and the
+// promise rejects if it could not be stored.
+await ReactNativePasskeyAutofill.setHdRootSecret(hdRootBytes);
+
+// Closed transaction-preview policy for one passkey: exactly `{ kind: "never" }`
+// or `{ kind: "required", httpsEndpoint, token }` with an HTTPS origin. Anything
+// else is rejected before (and again inside) native code.
+await configureCredentialTransactionPreviewPolicy(credentialId, {
+  kind: "required",
+  httpsEndpoint: "https://gateway.example",
+  token: previewToken,
+});
+
+// Synced site passkeys from the wallet's other devices; each must re-derive to
+// its credential ID from the HD root. Existing credentials are never overwritten.
+const { restored, skipped } = await ReactNativePasskeyAutofill.restoreDerivedCredentials(records);
+```
+
+`getStoredCredentials()` reports `rpId`, `userIdBase64Url`, `userDisplayName` and
+`transactionPreviewPolicy` with the same meaning on iOS and Android.
 
 ## Events
 

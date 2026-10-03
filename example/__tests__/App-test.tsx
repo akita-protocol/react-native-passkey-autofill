@@ -3,7 +3,7 @@ import renderer from "react-test-renderer";
 import App from "../App";
 
 // Mock the native module
-jest.mock("@algorandfoundation/react-native-passkey-autofill", () => ({
+jest.mock("@akta/react-native-passkey-autofill", () => ({
   setMasterKey: jest.fn(),
   setHdRootKeyId: jest.fn(),
   getHdRootKeyId: jest.fn(),

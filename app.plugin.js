@@ -3,6 +3,7 @@ const {
   withEntitlementsPlist,
   withInfoPlist,
   withStringsXml,
+  withAppBuildGradle,
   withProjectBuildGradle,
   withMainApplication,
   withDangerousMod,
@@ -19,12 +20,24 @@ const IOS_EXTENSION_FILES = [
   "PasskeyKeystoreMMKV.mm",
   "PasskeyAutofillCredentialProvider-Bridging-Header.h",
   "PasskeyCredentialStore.swift",
+  "TransactionPreviewPolicy.swift",
+  "PendingCredentialOperation.swift",
   "WebAuthn.swift",
+  "BiometricRequirement.swift",
+  "Prf.swift",
 ];
 const IOS_EXTENSION_SOURCE_FILES = IOS_EXTENSION_FILES.filter((file) => !file.endsWith(".h"));
 const DETERMINISTIC_P256_PACKAGE_URL =
   "https://github.com/algorandfoundation/deterministic-P256-swift/";
 const DETERMINISTIC_P256_PRODUCT_NAME = "deterministicP256-swift";
+// The exact upstream commit the AutoFill extension compiles against. This
+// package derives passkey keys from the wallet's root material and produces the
+// signatures, so it is pinned to an immutable revision rather than a branch: a
+// branch head can move between two prebuilds of the same wallet commit, which
+// would compile different native crypto into otherwise identical builds.
+// Reviewed when bumped; `main` at the time of pinning.
+const DETERMINISTIC_P256_PACKAGE_REVISION = "4fe03ee04894cb3dcf706b9e70a39588c1cec1c9";
+const GIT_REVISION_REGEX = /^[0-9a-f]{40}$/;
 
 const getAssociatedDomain = (site) => {
   try {
@@ -41,6 +54,79 @@ const getIosBundleIdentifier = (config) =>
 
 const getAppGroup = (config, props) =>
   props.appGroup || `group.${getIosBundleIdentifier(config)}.passkey-autofill`;
+
+// Keychain access-group *base* (without the `$(AppIdentifierPrefix)` team
+// prefix, which Xcode resolves at build time). Shared by the app and the
+// AutoFill extension so both can read the master key from the Keychain.
+const getKeychainGroup = (config, props) =>
+  props.keychainGroup || `${getIosBundleIdentifier(config)}.passkey-autofill`;
+
+// Which commit of `deterministic-P256-swift` the extension links. Integrators may
+// move the pin with `deterministicP256PackageRevision` (a full 40-character
+// commit SHA). Branch and version-range requirements are refused outright:
+// neither is an integrity pin for code that handles wallet root material.
+const getDeterministicP256Revision = (props) => {
+  if (props.deterministicP256PackageBranch !== undefined) {
+    throw new Error(
+      'react-native-passkey-autofill: "deterministicP256PackageBranch" is no longer supported. ' +
+        "A branch is a mutable reference and cannot pin the native crypto compiled into the " +
+        'AutoFill extension; set "deterministicP256PackageRevision" to a full 40-character commit SHA instead.',
+    );
+  }
+  if (props.deterministicP256PackageRevision === undefined) {
+    return DETERMINISTIC_P256_PACKAGE_REVISION;
+  }
+  const value = String(props.deterministicP256PackageRevision).trim().toLowerCase();
+  if (!GIT_REVISION_REGEX.test(value)) {
+    throw new Error(
+      `react-native-passkey-autofill: "deterministicP256PackageRevision" must be a full 40-character commit SHA, received "${props.deterministicP256PackageRevision}".`,
+    );
+  }
+  return value;
+};
+
+const AAGUID_REGEX =
+  /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
+
+// Optional authenticator AAGUID. When set, both platforms embed it in attestation
+// responses so the credential provider presents a consistent identity to relying parties.
+const getAaguid = (props) => {
+  if (!props.aaguid) {
+    return null;
+  }
+  const value = String(props.aaguid).trim();
+  if (!AAGUID_REGEX.test(value)) {
+    throw new Error(
+      `react-native-passkey-autofill: "aaguid" must be a UUID string, received "${props.aaguid}".`,
+    );
+  }
+  return value;
+};
+
+const BIOMETRIC_REQUIREMENT_VALUES = ["strong", "strongOrCredential", "weakOrCredential"];
+const DEFAULT_BIOMETRIC_REQUIREMENT = "strongOrCredential";
+// Must match `META_DATA_KEY` in android/.../auth/BiometricRequirement.kt.
+const ANDROID_BIOMETRIC_META_DATA_NAME = "co.algorand.passkeyautofill.BIOMETRIC_REQUIREMENT";
+// Must match `infoDictionaryKey` in ios/AutofillCredentialProvider/BiometricRequirement.swift.
+const IOS_BIOMETRIC_INFO_PLIST_KEY = "ReactNativePasskeyAutofillBiometricRequirement";
+
+// Authenticators a passkey operation will accept. Default is intentionally more permissive than
+// strong-only: it leaves iOS unchanged (passcode still allowed) and lets Android accept the device
+// credential. See docs/superpowers/specs/2026-05-28-configurable-biometric-requirement-design.md.
+const getBiometricRequirement = (props) => {
+  if (props.biometricRequirement == null) {
+    return DEFAULT_BIOMETRIC_REQUIREMENT;
+  }
+  const value = String(props.biometricRequirement).trim();
+  if (!BIOMETRIC_REQUIREMENT_VALUES.includes(value)) {
+    throw new Error(
+      `react-native-passkey-autofill: "biometricRequirement" must be one of ${BIOMETRIC_REQUIREMENT_VALUES.join(
+        ", ",
+      )}, received "${props.biometricRequirement}".`,
+    );
+  }
+  return value;
+};
 
 const normalizeXcodeName = (name) => String(name || "").replace(/^"|"$/g, "");
 
@@ -76,7 +162,12 @@ const writePlist = (filePath, body) => {
   fs.writeFileSync(filePath, body);
 };
 
-const extensionInfoPlist = ({ label, supportedDomains }) => `<?xml version="1.0" encoding="UTF-8"?>
+const extensionInfoPlist = ({
+  label,
+  supportedDomains,
+  aaguid,
+  biometricRequirement,
+}) => `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
@@ -98,6 +189,10 @@ const extensionInfoPlist = ({ label, supportedDomains }) => `<?xml version="1.0"
   <string>$(PASSKEY_AUTOFILL_APP_GROUP)</string>
   <key>AppGroupIdentifier</key>
   <string>$(PASSKEY_AUTOFILL_APP_GROUP)</string>
+  <key>ReactNativePasskeyAutofillKeychainGroup</key>
+  <string>$(PASSKEY_AUTOFILL_KEYCHAIN_GROUP)</string>
+${aaguid ? `  <key>ReactNativePasskeyAutofillAAGUID</key>\n  <string>${aaguid}</string>\n` : ""}  <key>${IOS_BIOMETRIC_INFO_PLIST_KEY}</key>
+  <string>${biometricRequirement}</string>
   <key>NSFaceIDUsageDescription</key>
   <string>${label} uses Face ID to create and use passkeys.</string>
   <key>NSExtension</key>
@@ -133,7 +228,10 @@ ${supportedDomains.map((domain) => `      <string>${domain}</string>`).join("\n"
 </plist>
 `;
 
-const extensionEntitlementsPlist = ({ appGroup }) => `<?xml version="1.0" encoding="UTF-8"?>
+const extensionEntitlementsPlist = ({
+  appGroup,
+  keychainGroup,
+}) => `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
@@ -142,6 +240,10 @@ const extensionEntitlementsPlist = ({ appGroup }) => `<?xml version="1.0" encodi
   <key>com.apple.security.application-groups</key>
   <array>
     <string>${appGroup}</string>
+  </array>
+  <key>keychain-access-groups</key>
+  <array>
+    <string>$(AppIdentifierPrefix)${keychainGroup}</string>
   </array>
 </dict>
 </plist>
@@ -153,10 +255,14 @@ const withIosPasskeyAutofill = (config, props = {}) => {
   const associatedDomain = getAssociatedDomain(site);
   const supportedDomains = props.supportedDomains || [associatedDomain];
   const appGroup = getAppGroup(config, props);
+  const keychainGroup = getKeychainGroup(config, props);
+  const aaguid = getAaguid(props);
+  const biometricRequirement = getBiometricRequirement(props);
 
   config = withInfoPlist(config, (config) => {
     config.modResults.ReactNativePasskeyAutofillAppGroup = appGroup;
     config.modResults.AppGroupIdentifier = appGroup;
+    config.modResults.ReactNativePasskeyAutofillKeychainGroup = keychainGroup;
     return config;
   });
 
@@ -170,6 +276,10 @@ const withIosPasskeyAutofill = (config, props = {}) => {
     const appGroups = new Set(config.modResults["com.apple.security.application-groups"] || []);
     appGroups.add(appGroup);
     config.modResults["com.apple.security.application-groups"] = [...appGroups];
+
+    const keychainGroups = new Set(config.modResults["keychain-access-groups"] || []);
+    keychainGroups.add(`$(AppIdentifierPrefix)${keychainGroup}`);
+    config.modResults["keychain-access-groups"] = [...keychainGroups];
     return config;
   });
 
@@ -187,11 +297,11 @@ const withIosPasskeyAutofill = (config, props = {}) => {
 
       writePlist(
         path.join(extensionRoot, `${IOS_EXTENSION_NAME}-Info.plist`),
-        extensionInfoPlist({ label, supportedDomains }),
+        extensionInfoPlist({ label, supportedDomains, aaguid, biometricRequirement }),
       );
       writePlist(
         path.join(extensionRoot, `${IOS_EXTENSION_NAME}.entitlements`),
-        extensionEntitlementsPlist({ appGroup }),
+        extensionEntitlementsPlist({ appGroup, keychainGroup }),
       );
       return config;
     },
@@ -201,11 +311,13 @@ const withIosPasskeyAutofill = (config, props = {}) => {
     const project = config.modResults;
     const bundleIdentifier = `${getIosBundleIdentifier(config)}.PasskeyAutofillCredentialProvider`;
     const buildNumber = config.ios?.buildNumber || config.versionCode || "1";
-    const developmentTeam =
-      props.developmentTeam ||
-      props.appleTeamId ||
-      getDevelopmentTeam(project) ||
-      "$(DEVELOPMENT_TEAM)";
+    const rawDevelopmentTeam =
+      props.developmentTeam || props.appleTeamId || getDevelopmentTeam(project);
+    const developmentTeam = rawDevelopmentTeam
+      ? rawDevelopmentTeam.startsWith('"')
+        ? rawDevelopmentTeam
+        : `"${rawDevelopmentTeam}"`
+      : '"$(DEVELOPMENT_TEAM)"';
     let target =
       getExtensionTarget(project) ||
       project.addTarget(IOS_EXTENSION_NAME, "app_extension", IOS_EXTENSION_NAME, bundleIdentifier);
@@ -229,7 +341,7 @@ const withIosPasskeyAutofill = (config, props = {}) => {
         packageName: "deterministic-P256-swift",
         productName: DETERMINISTIC_P256_PRODUCT_NAME,
         repositoryURL: props.deterministicP256PackageURL || DETERMINISTIC_P256_PACKAGE_URL,
-        branch: props.deterministicP256PackageBranch || "main",
+        revision: getDeterministicP256Revision(props),
       });
       setExtensionBuildSettings(project, target.uuid, {
         ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: '"AccentColor"',
@@ -240,6 +352,7 @@ const withIosPasskeyAutofill = (config, props = {}) => {
         IPHONEOS_DEPLOYMENT_TARGET: "17.0",
         MARKETING_VERSION: `"${config.version || "1.0.0"}"`,
         PASSKEY_AUTOFILL_APP_GROUP: `"${appGroup}"`,
+        PASSKEY_AUTOFILL_KEYCHAIN_GROUP: `"${keychainGroup}"`,
         GCC_PREPROCESSOR_DEFINITIONS: ['"$(inherited)"', "FORCE_POSIX"],
         PRODUCT_BUNDLE_IDENTIFIER: `"${bundleIdentifier}"`,
         SWIFT_ACTIVE_COMPILATION_CONDITIONS: "PASSKEY_AUTOFILL_EXTENSION",
@@ -264,9 +377,13 @@ const withIosPasskeyAutofill = (config, props = {}) => {
   return config;
 };
 
+// Pins `repositoryURL` to `revision` (a commit SHA) for the extension target. An
+// existing reference to the same repository has its requirement replaced, so a
+// project that was prebuilt while the plugin still tracked a branch is moved to
+// the pin instead of keeping the mutable requirement.
 const addSwiftPackageProduct = (
   project,
-  { targetUuid, packageName, productName, repositoryURL, branch },
+  { targetUuid, packageName, productName, repositoryURL, revision },
 ) => {
   const objects = project.hash.project.objects;
   objects.XCRemoteSwiftPackageReference = objects.XCRemoteSwiftPackageReference || {};
@@ -274,20 +391,23 @@ const addSwiftPackageProduct = (
   objects.PBXBuildFile = objects.PBXBuildFile || {};
 
   const packageComment = `XCRemoteSwiftPackageReference "${packageName}"`;
+  const requirement = {
+    kind: "revision",
+    revision,
+  };
   let packageUuid = Object.keys(objects.XCRemoteSwiftPackageReference).find(
     (key) =>
       !key.endsWith("_comment") &&
       objects.XCRemoteSwiftPackageReference[key].repositoryURL === `"${repositoryURL}"`,
   );
-  if (!packageUuid) {
+  if (packageUuid) {
+    objects.XCRemoteSwiftPackageReference[packageUuid].requirement = requirement;
+  } else {
     packageUuid = project.generateUuid();
     objects.XCRemoteSwiftPackageReference[packageUuid] = {
       isa: "XCRemoteSwiftPackageReference",
       repositoryURL: `"${repositoryURL}"`,
-      requirement: {
-        branch,
-        kind: "branch",
-      },
+      requirement,
     };
     objects.XCRemoteSwiftPackageReference[`${packageUuid}_comment`] = packageComment;
   }
@@ -588,6 +708,7 @@ const withUserAgent = (config) => {
 const withPasskeyAutofill = (config, props = {}) => {
   const site = props.site || "https://debug.liquidauth.com";
   const label = props.label || "My Credential Provider";
+  const aaguid = getAaguid(props);
 
   config = withIosPasskeyAutofill(config, props);
   config = withAndroidCookieModule(config);
@@ -615,36 +736,84 @@ const withPasskeyAutofill = (config, props = {}) => {
     return config;
   });
 
-  // 2. Add asset_statements string to strings.xml
-  config = withStringsXml(config, (config) => {
-    config.modResults = AndroidConfig.Strings.setStringItem(
-      [
-        {
-          $: { name: "asset_statements", translatable: "false" },
-          _: JSON.stringify([
-            {
-              relation: [
-                "delegate_permission/common.handle_all_urls",
-                "delegate_permission/common.get_login_creds",
-              ],
-              target: {
-                namespace: "web",
-                site: site,
-              },
-            },
-          ]),
-        },
-        {
-          $: { name: "passkey_autofill_label", translatable: "true" },
-          _: label,
-        },
-      ],
-      config.modResults,
-    );
+  // Expose the configured biometric requirement to the native provider/activities.
+  config = withAndroidManifest(config, (config) => {
+    const application = config.modResults.manifest.application[0];
+    if (!application["meta-data"]) {
+      application["meta-data"] = [];
+    }
+    const name = ANDROID_BIOMETRIC_META_DATA_NAME;
+    const existing = application["meta-data"].find((m) => m["$"]["android:name"] === name);
+    const value = getBiometricRequirement(props);
+    if (existing) {
+      existing["$"]["android:value"] = value;
+    } else {
+      application["meta-data"].push({ $: { "android:name": name, "android:value": value } });
+    }
     return config;
   });
 
-  // 3. Add local Maven repository for local AAR
+  // 2. Add asset_statements string to strings.xml
+  config = withStringsXml(config, (config) => {
+    const stringItems = [
+      {
+        $: { name: "asset_statements", translatable: "false" },
+        _: JSON.stringify([
+          {
+            relation: [
+              "delegate_permission/common.handle_all_urls",
+              "delegate_permission/common.get_login_creds",
+            ],
+            target: {
+              namespace: "web",
+              site: site,
+            },
+          },
+        ]),
+      },
+      {
+        $: { name: "passkey_autofill_label", translatable: "true" },
+        _: label,
+      },
+    ];
+    if (aaguid) {
+      stringItems.push({
+        $: { name: "passkey_autofill_aaguid", translatable: "false" },
+        _: aaguid,
+      });
+    }
+    config.modResults = AndroidConfig.Strings.setStringItem(stringItems, config.modResults);
+    return config;
+  });
+
+  // 3. Inject `pickFirst '**/libmmkv.so'` into the consumer app's
+  // `android/app/build.gradle`. The native `libmmkv.so` is bundled by both
+  // this module (via `io.github.zhongwuzw:mmkv`) and `react-native-mmkv`
+  // (which also depends on the same artifact, sometimes pinned to a different
+  // version). When two copies end up on the merged-libs path, AGP fails
+  // `mergeDebugNativeLibs` with: "2 files found with path
+  // 'lib/<abi>/libmmkv.so'". Picking the first occurrence is safe because
+  // the `com.tencent.mmkv.MMKV` Java surface we touch is ABI-stable across
+  // the 2.x range.
+  config = withAppBuildGradle(config, (config) => {
+    const marker = "pickFirst '**/libmmkv.so'";
+    if (config.modResults.contents.includes(marker)) {
+      return config;
+    }
+    let contents = config.modResults.contents;
+    if (/packagingOptions\s*\{/.test(contents)) {
+      contents = contents.replace(/packagingOptions\s*\{/, `packagingOptions {\n        ${marker}`);
+    } else if (/android\s*\{/.test(contents)) {
+      contents = contents.replace(
+        /android\s*\{/,
+        `android {\n    packagingOptions {\n        ${marker}\n    }\n`,
+      );
+    }
+    config.modResults.contents = contents;
+    return config;
+  });
+
+  // 4. Add local Maven repository for local AAR
   config = withProjectBuildGradle(config, (config) => {
     if (config.modResults.contents.includes("android/libs/repo")) {
       return config;
@@ -673,3 +842,8 @@ const withPasskeyAutofill = (config, props = {}) => {
 };
 
 module.exports = withPasskeyAutofill;
+module.exports.getBiometricRequirement = getBiometricRequirement;
+module.exports.getAaguid = getAaguid;
+module.exports.getDeterministicP256Revision = getDeterministicP256Revision;
+module.exports.addSwiftPackageProduct = addSwiftPackageProduct;
+module.exports.DETERMINISTIC_P256_PACKAGE_REVISION = DETERMINISTIC_P256_PACKAGE_REVISION;
