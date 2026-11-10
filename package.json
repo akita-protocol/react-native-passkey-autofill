@@ -1,6 +1,6 @@
 {
   "name": "@akita-protocol/react-native-passkey-autofill",
-  "version": "1.0.0-canary.29",
+  "version": "1.0.0-canary.19",
   "description": "Passkey AutoFill React Native",
   "keywords": [
     "@akita-protocol/react-native-passkey-autofill",
