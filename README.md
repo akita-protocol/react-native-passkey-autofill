@@ -1,4 +1,4 @@
-# @akta/react-native-passkey-autofill
+# @akita-protocol/react-native-passkey-autofill
 
 <p align="center">
   <img src="https://raw.githubusercontent.com/akita-protocol/react-native-passkey-autofill/refs/heads/main/assets/banner.png" width="100%" />
@@ -15,7 +15,7 @@ For bare React Native projects, you must ensure that you have [installed and con
 ### Add the package to your dependencies
 
 ```bash
-pnpm add @akta/react-native-passkey-autofill
+pnpm add @akita-protocol/react-native-passkey-autofill
 ```
 
 ### Configure for Android
@@ -31,7 +31,7 @@ If you are using Expo, you can configure the plugin in your `app.json` or `app.c
   "expo": {
     "plugins": [
       [
-        "@akta/react-native-passkey-autofill",
+        "@akita-protocol/react-native-passkey-autofill",
         {
           "site": "https://your-fido-server.com",
           "label": "My Custom Credential Provider"
@@ -78,7 +78,7 @@ iOS passkey AutoFill requires a Credential Provider extension, an App Group shar
     },
     "plugins": [
       [
-        "@akta/react-native-passkey-autofill",
+        "@akita-protocol/react-native-passkey-autofill",
         {
           "site": "https://your-fido-server.com",
           "label": "My Custom Credential Provider",
@@ -118,7 +118,7 @@ Call `refreshCredentialIdentities()` after creating, importing, deleting, or res
 ## Usage
 
 ```typescript
-import ReactNativePasskeyAutofill from "@akta/react-native-passkey-autofill";
+import ReactNativePasskeyAutofill from "@akita-protocol/react-native-passkey-autofill";
 
 // 1. Set the master key for encryption (raw bytes — never a hex string, so
 //    the secret isn't materialized as a non-zeroable JS string). The promise
@@ -147,7 +147,7 @@ This fork adds the APIs the Akita wallet uses on top of upstream:
 ```typescript
 import ReactNativePasskeyAutofill, {
   configureCredentialTransactionPreviewPolicy,
-} from "@akta/react-native-passkey-autofill";
+} from "@akita-protocol/react-native-passkey-autofill";
 
 // The wallet's HD root, as raw bytes. New site passkeys derive from it
 // (derivation scheme "akita-hd-root"); it is stored like the master key and the
@@ -176,7 +176,7 @@ const { restored, skipped } = await ReactNativePasskeyAutofill.restoreDerivedCre
 You can listen for events emitted by the native module when a passkey is successfully added or authenticated.
 
 ```typescript
-import ReactNativePasskeyAutofill from "@akta/react-native-passkey-autofill";
+import ReactNativePasskeyAutofill from "@akita-protocol/react-native-passkey-autofill";
 import { useEffect } from "react";
 
 // ... inside a component or hook
