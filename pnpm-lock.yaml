@@ -156,7 +156,7 @@ importers:
 
   example:
     dependencies:
-      '@akta/react-native-passkey-autofill':
+      '@akita-protocol/react-native-passkey-autofill':
         specifier: workspace:*
         version: link:..
       '@algorandfoundation/keystore':

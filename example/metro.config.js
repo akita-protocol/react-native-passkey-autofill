@@ -19,7 +19,7 @@ config.resolver.nodeModulesPaths = [
 ];
 
 config.resolver.extraNodeModules = {
-  "@akta/react-native-passkey-autofill": "..",
+  "@akita-protocol/react-native-passkey-autofill": "..",
   crypto: path.resolve(__dirname, "node_modules", "react-native-quick-crypto"),
   "node:crypto": path.resolve(__dirname, "node_modules", "react-native-quick-crypto"),
 };

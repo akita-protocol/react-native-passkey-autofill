@@ -1,4 +1,4 @@
-import ReactNativePasskeyAutofill from "@akta/react-native-passkey-autofill";
+import ReactNativePasskeyAutofill from "@akita-protocol/react-native-passkey-autofill";
 import { AppState, Button, SafeAreaView, ScrollView, Text, View, StyleSheet } from "react-native";
 import { useEffect, useState } from "react";
 import { Passkey } from "react-native-passkey";
